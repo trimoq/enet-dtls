@@ -1,0 +1,3 @@
+[submodule "vendor/enet-sys"]
+	path = vendor/enet-sys
+	url = https://github.com/trimoq/enet-sys.git

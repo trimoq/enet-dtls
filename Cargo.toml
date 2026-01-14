@@ -4,19 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [patch.crates-io]
-# enet-sys = { git = "https://github.com/trimoq/enet-sys.git", branch = "local-patch" }
 enet-sys = { path="./vendor/enet-sys" }
-# enet = { path="./vendor/enet-rs" }
-# enet = { git = "https://github.com/trimoq/enet-rs.git", branch = "update-enet-sys" }
 
 [dependencies]
-
 enet = "0.3.0"
 enet-sys = "1.0.3"
-
-# [dependencies.enet]
-# version = "0.3.0"
-
-# [dependencies.enet-sys]
-# version = "1.0.3"
-# path = "./vendor/enet-sys"

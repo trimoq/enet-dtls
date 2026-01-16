@@ -12,9 +12,8 @@
 ---
 
 ## Features
-- openssl dtls wrapper around the enet protocol to work with the [PacketPeerDTLS](https://docs.godotengine.org/en/stable/classes/class_packetpeerdtls.html) from godot.
-- only the server-side is implemented. This means `accept` works but `connect` does not.
-- enforce [dtls cookies ](https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.1) as per RFC 6347 to prevent UDP amplification attacks.
+- Openssl dtls wrapper around the enet protocol to work with the [PacketPeerDTLS](https://docs.godotengine.org/en/stable/classes/class_packetpeerdtls.html) from godot.
+- Enforces [dtls cookies ](https://datatracker.ietf.org/doc/html/rfc6347#section-4.2.1) as per RFC 6347 to prevent UDP amplification attacks.
 
 ## Build
 
@@ -22,6 +21,7 @@ If included via cargo in your project, this is taken care of.
 
 ```
 git submodule update --init --recursive
+cargo build --release
 ```
 
 ## Patched dependencies
@@ -31,4 +31,4 @@ This allows us to hook `accept`, `send` and `receive` operations to go through o
 
 ## License
 
-Licensed under [MIT LICENSE](LICENSE) or http://opensource.org/licenses/MIT
+Licensed under the [MIT LICENSE](LICENSE) or http://opensource.org/licenses/MIT

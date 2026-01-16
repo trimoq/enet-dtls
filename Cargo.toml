@@ -9,3 +9,23 @@ enet-sys = { path="./vendor/enet-sys" }
 [dependencies]
 enet = "0.3.0"
 enet-sys = "1.0.3"
+
+openssl = "0.10"
+bytes = "1"
+thiserror = "2.0.17"
+log = "0.4"
+env_logger = "0.11"
+
+socket2 = "0.5"
+slab = "0.4.11"
+foreign-types-shared = "0.1.1"
+
+
+[dependencies.openssl-sys]
+version = "0.9.111"
+features = ["bindgen"]
+
+
+[dependencies.mio]
+version = "1.1.1"
+features = ["net", "os-poll"]

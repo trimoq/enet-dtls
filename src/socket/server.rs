@@ -1,15 +1,11 @@
 use log::{trace, warn};
-use mio::event::Event;
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
-use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslContext, SslMethod, SslRef, SslStream, SslStreamBuilder};
-use openssl_sys::{SSL, bio_addr_st};
-use slab::Slab;
+use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslRef, SslStream};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{self, ErrorKind, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
-use thiserror::Error;
 
 use crate::socket::connections::Connections;
 use crate::{PacketSocket, ReceiveResult};
@@ -19,24 +15,27 @@ const LISTENER: Token = Token(0);
 pub struct ServerDtlsSocket {
     mio_stuff: MioStuff,
     tls_stuff: TlsStuff,
-    state: State
+    state: State,
 }
-struct MioStuff{
+struct MioStuff {
     poll: Poll,
     events: Events,
 }
-struct TlsStuff{
-    acc: SslAcceptor
+struct TlsStuff {
+    acc: SslAcceptor,
 }
-struct State{
+struct State {
     addr: SocketAddr,
     connections: Connections,
-    listener: UdpSocket
+    listener: UdpSocket,
 }
 
-impl State{
-
-    fn handle_packet_on_new_connection(&mut self, tls: &TlsStuff, registry: &Registry) -> io::Result<()> {
+impl State {
+    fn handle_packet_on_new_connection(
+        &mut self,
+        tls: &TlsStuff,
+        registry: &Registry,
+    ) -> io::Result<()> {
         let mut recv_buf = [0u8; 1500];
         let ctx = tls.acc.context();
 
@@ -82,7 +81,7 @@ impl State{
         registry.register(&mut mio_udp, token, Interest::READABLE)?;
 
         let wrapper = MioUdpWrapper(mio_udp);
-        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|e| {
+        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
             warn!("SSL stream crreation failed");
             io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
         })?;
@@ -110,7 +109,6 @@ impl State{
 
         Ok(())
     }
-
 
     fn handle_packet_on_existing_connection(&mut self, token: Token) {
         trace!("Token matching");
@@ -146,19 +144,19 @@ impl PacketSocket for ServerDtlsSocket {
         todo!()
     }
 
-    fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
+    fn send(&mut self, _addr: SocketAddr, _bytes: &[u8]) -> io::Result<()> {
         todo!()
     }
 
-    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult> {
+    fn receive(&mut self, _buffer: &mut [u8]) -> io::Result<ReceiveResult> {
         todo!()
     }
 
     fn poll(&mut self) -> io::Result<()> {
-        let ServerDtlsSocket{
-           mio_stuff,
-           tls_stuff,
-           state
+        let ServerDtlsSocket {
+            mio_stuff,
+            tls_stuff,
+            state,
         } = self;
 
         mio_stuff.poll.poll(&mut mio_stuff.events, None)?;
@@ -211,11 +209,14 @@ impl ServerDtlsSocket {
         let res = ServerDtlsSocket {
             mio_stuff: MioStuff { poll, events },
             tls_stuff: TlsStuff { acc },
-            state: State { connections , listener, addr },
+            state: State {
+                connections,
+                listener,
+                addr,
+            },
         };
         Ok(res)
     }
-
 }
 
 pub struct Client {

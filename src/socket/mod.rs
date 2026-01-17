@@ -1,12 +1,5 @@
-use mio::net::UdpSocket;
-use mio::{Events, Interest, Poll, Token};
-use openssl::ssl::{Ssl, SslAcceptor, SslContext, SslMethod, SslRef, SslStream, SslStreamBuilder};
-use openssl_sys::{SSL, bio_addr_st};
-use slab::Slab;
-use socket2::{Domain, Protocol, Socket, Type};
-use std::io::{self, ErrorKind, Read, Result as IoResult, Write};
+use std::io::{self};
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
 use thiserror::Error;
 
 use crate::socket::client::ClientDtlsSocket;
@@ -14,9 +7,9 @@ use crate::socket::fresh::FreshSocket;
 use crate::socket::server::ServerDtlsSocket;
 
 mod client;
+mod connections;
 mod fresh;
 mod server;
-mod connections;
 
 pub trait PacketSocket {
     fn get_addr(&self) -> io::Result<SocketAddr>;
@@ -99,11 +92,11 @@ impl PacketSocketWrapper {
     }
 
     fn do_bind(&self, addr: SocketAddr) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
-        let sock = ServerDtlsSocket::bind(addr).map_err(|e| PacketSocketError::TODO)?;
+        let sock = ServerDtlsSocket::bind(addr).map_err(|_e| PacketSocketError::TODO)?;
         Ok(Box::new(sock))
     }
     fn do_connect(&self, addr: SocketAddr) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
-        let sock = ClientDtlsSocket::connect(addr).map_err(|e| PacketSocketError::TODO)?;
+        let sock = ClientDtlsSocket::connect(addr).map_err(|_e| PacketSocketError::TODO)?;
         Ok(Box::new(sock))
     }
 }

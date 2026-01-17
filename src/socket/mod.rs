@@ -16,6 +16,7 @@ use crate::socket::server::ServerDtlsSocket;
 mod client;
 mod fresh;
 mod server;
+mod connections;
 
 pub trait PacketSocket {
     fn get_addr(&self) -> io::Result<SocketAddr>;

@@ -1,7 +1,8 @@
 use log::{trace, warn};
+use mio::event::Event;
 use mio::net::UdpSocket;
-use mio::{Events, Interest, Poll, Token};
-use openssl::ssl::{Ssl, SslAcceptor, SslContext, SslMethod, SslRef, SslStream, SslStreamBuilder};
+use mio::{Events, Interest, Poll, Registry, Token};
+use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslContext, SslMethod, SslRef, SslStream, SslStreamBuilder};
 use openssl_sys::{SSL, bio_addr_st};
 use slab::Slab;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -10,17 +11,134 @@ use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use thiserror::Error;
 
+use crate::socket::connections::Connections;
 use crate::{PacketSocket, ReceiveResult};
 
 const LISTENER: Token = Token(0);
 
 pub struct ServerDtlsSocket {
-    addr: SocketAddr,
+    mio_stuff: MioStuff,
+    tls_stuff: TlsStuff,
+    state: State
+}
+struct MioStuff{
     poll: Poll,
     events: Events,
-    acc: SslAcceptor,
-    clients: Slab<Client>,
-    listener: UdpSocket,
+}
+struct TlsStuff{
+    acc: SslAcceptor
+}
+struct State{
+    addr: SocketAddr,
+    connections: Connections,
+    listener: UdpSocket
+}
+
+impl State{
+
+    fn handle_packet_on_new_connection(&mut self, tls: &TlsStuff, registry: &Registry) -> io::Result<()> {
+        let mut recv_buf = [0u8; 1500];
+        let ctx = tls.acc.context();
+
+        let (len, src) = match self.listener.peek_from(&mut recv_buf) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        trace!("New accept: {:?}", &recv_buf[..len]);
+
+        let mut ssl = Ssl::new(&ctx).unwrap();
+        let ssl_ref: &mut SslRef = &mut ssl;
+
+        let is_verified = unsafe {
+            let bio = openssl_sys::BIO_new_dgram(self.listener.as_raw_fd(), 0);
+            openssl_sys::SSL_set_bio(ssl_ref.as_ptr(), bio, bio);
+            let bio_addr = openssl_sys::BIO_ADDR_new();
+            use foreign_types_shared::ForeignTypeRef;
+            let res = openssl_sys::DTLSv1_listen(ssl_ref.as_ptr(), bio_addr);
+            trace!("Verify result: {res}");
+            res > 0
+        };
+
+        if !is_verified {
+            trace!("Unverified cookie, dropping");
+            // let _ = self.listener.recv_from(&mut recv_buf);
+            return Ok(());
+        }
+
+        trace!("Verified client, begin client setup");
+
+        let c_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        c_sock.set_reuse_address(true)?;
+        c_sock.set_nonblocking(true)?;
+        c_sock.bind(&(self.addr.into()))?;
+        c_sock.connect(&src.into())?;
+
+        let mut mio_udp = UdpSocket::from_std(c_sock.into());
+
+        let entry = self.connections.vacant_entry();
+        let token = Token(entry.key() + 1);
+
+        registry.register(&mut mio_udp, token, Interest::READABLE)?;
+
+        let wrapper = MioUdpWrapper(mio_udp);
+        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|e| {
+            warn!("SSL stream crreation failed");
+            io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
+        })?;
+        match ssl_stream.accept() {
+            Ok(_) => {
+                trace!("Handshake accept ok")
+            }
+            Err(e) => {
+                trace!("Hanshake accept err: {e}");
+                match e.code() {
+                    ErrorCode::WANT_READ => trace!("Read would have blocked"),
+                    ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
+                    _ => {
+                        warn!("Other error occured");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        entry.insert(Client {
+            ssl_stream,
+            buffer: vec![0u8; 4096],
+        });
+
+        Ok(())
+    }
+
+
+    fn handle_packet_on_existing_connection(&mut self, token: Token) {
+        trace!("Token matching");
+
+        let client_idx = token.0 - 1;
+        let mut should_remove = false;
+
+        if let Some(client) = self.connections.get_mut(client_idx) {
+            // Use the persistent buffer instead of stack allocation
+            match client.ssl_stream.read(&mut client.buffer) {
+                Ok(len) => {
+                    trace!("RECEIVED {:?}", &client.buffer[..len]);
+                    let _ = client.ssl_stream.write_all(&client.buffer[..len]);
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    trace!("Would block");
+                }
+                Err(e) => {
+                    trace!("Removing: {e}");
+                    should_remove = true
+                }
+            }
+        }
+
+        if should_remove {
+            self.connections.remove(client_idx);
+        }
+    }
 }
 
 impl PacketSocket for ServerDtlsSocket {
@@ -37,26 +155,23 @@ impl PacketSocket for ServerDtlsSocket {
     }
 
     fn poll(&mut self) -> io::Result<()> {
-        // let ServerDtlsSocket{
-        //     addr,
-        //     poll,
-        //     events,
-        //     acc,
-        //     clients,
-        //     listener
-        // } = self;
+        let ServerDtlsSocket{
+           mio_stuff,
+           tls_stuff,
+           state
+        } = self;
 
-        self.poll.poll(&mut self.events, None)?;
+        mio_stuff.poll.poll(&mut mio_stuff.events, None)?;
 
         // todo, receive globals here
 
-        for event in self.events.iter() {
+        for event in mio_stuff.events.iter() {
             match event.token() {
                 LISTENER => {
-                    self.handle_packet_on_new_connection();
+                    state.handle_packet_on_new_connection(tls_stuff, mio_stuff.poll.registry());
                 }
                 token => {
-                    self.handle_packet_on_existing_connection(token);
+                    state.handle_packet_on_existing_connection(token);
                 }
             }
         }
@@ -91,118 +206,19 @@ impl ServerDtlsSocket {
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
 
-        let clients = Slab::new();
+        let connections = Connections::new();
 
         let res = ServerDtlsSocket {
-            addr,
-            poll,
-            events,
-            acc,
-            clients,
-            listener,
+            mio_stuff: MioStuff { poll, events },
+            tls_stuff: TlsStuff { acc },
+            state: State { connections , listener, addr },
         };
         Ok(res)
     }
 
-    fn handle_packet_on_new_connection(&mut self) -> io::Result<()> {
-        let mut recv_buf = [0u8; 1500];
-        let ctx = self.acc.context();
-
-        let (len, src) = match self.listener.peek_from(&mut recv_buf) {
-            Ok(v) => v,
-            Err(_) => return Ok(()),
-        };
-
-        trace!("New accept: {:?}", &recv_buf[..len]);
-
-        let mut ssl = Ssl::new(&ctx).unwrap();
-        let ssl_ref: &mut SslRef = &mut ssl;
-
-        let is_verified = unsafe {
-            let bio = openssl_sys::BIO_new_dgram(self.listener.as_raw_fd(), 0);
-            openssl_sys::SSL_set_bio(ssl_ref.as_ptr(), bio, bio);
-            let bio_addr = openssl_sys::BIO_ADDR_new();
-            use foreign_types_shared::ForeignTypeRef;
-            let res = openssl_sys::DTLSv1_listen(ssl_ref.as_ptr(), bio_addr);
-            trace!("Verify result: {res}");
-            res > 0
-        };
-
-        if !is_verified {
-            trace!("Unverified cookie, dropping");
-            return Ok(());
-        }
-
-        trace!("Verified client");
-
-        let c_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        c_sock.set_reuse_address(true)?;
-        c_sock.set_nonblocking(true)?;
-        c_sock.bind(&(self.addr.into()))?;
-        c_sock.connect(&src.into())?;
-
-        let mut mio_udp = UdpSocket::from_std(c_sock.into());
-
-        let entry = self.clients.vacant_entry();
-        let token = Token(entry.key() + 1);
-
-        self.poll
-            .registry()
-            .register(&mut mio_udp, token, Interest::READABLE)?;
-
-        let wrapper = MioUdpWrapper(mio_udp);
-        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|e| {
-            warn!("SSL stream crreation failed");
-            io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
-        })?;
-        match ssl_stream.accept() {
-            Ok(_) => {
-                trace!("Handshake accept ok")
-            }
-            Err(e) => {
-                trace!("Hanshake accept err: {e}")
-                // todo handle error
-            }
-        }
-
-        entry.insert(Client {
-            ssl_stream,
-            buffer: vec![0u8; 4096],
-        });
-        let _ = self.listener.recv_from(&mut recv_buf);
-
-        Ok(())
-    }
-    fn handle_packet_on_existing_connection(&mut self, token: Token) {
-        println!("Token matching");
-
-        let client_idx = token.0 - 1;
-        let mut should_remove = false;
-
-        if let Some(client) = self.clients.get_mut(client_idx) {
-            // Use the persistent buffer instead of stack allocation
-            match client.ssl_stream.read(&mut client.buffer) {
-                Ok(len) => {
-                    println!("RECEIVED {:?}", &client.buffer[..len]);
-                    let _ = client.ssl_stream.write_all(&client.buffer[..len]);
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    println!("Would block");
-                }
-                Err(e) => {
-                    println!("Removing: {e}");
-                    should_remove = true
-                }
-            }
-        }
-
-        if should_remove {
-            self.clients.remove(client_idx);
-        }
-    }
 }
 
-struct Client {
+pub struct Client {
     ssl_stream: SslStream<MioUdpWrapper>,
     buffer: Vec<u8>,
 }
@@ -230,7 +246,7 @@ fn generate_cookie(
     _ssl: &mut SslRef,
     cookie: &mut [u8],
 ) -> Result<usize, openssl::error::ErrorStack> {
-    println!("Cookie generataed");
+    trace!("Cookie generataed");
     let secret = b"AAAAAAAAAAAAAAAA";
     cookie[..secret.len()].copy_from_slice(secret);
     Ok(secret.len())
@@ -239,6 +255,6 @@ fn generate_cookie(
 fn verify_cookie(_ssl: &mut SslRef, cookie: &[u8]) -> bool {
     let secret = b"AAAAAAAAAAAAAAAA";
     let res = cookie == secret;
-    println!("Cookie verified: {res}");
+    trace!("Cookie verified: {res}");
     res
 }

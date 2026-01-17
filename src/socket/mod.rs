@@ -1,7 +1,10 @@
+use bytes::Bytes;
+use core::ffi;
 use std::io::{self};
 use std::net::SocketAddr;
 use thiserror::Error;
 
+use crate::ffi::to_enet_addr;
 use crate::socket::client::ClientDtlsSocket;
 use crate::socket::fresh::FreshSocket;
 use crate::socket::server::ServerDtlsSocket;
@@ -20,6 +23,10 @@ pub trait PacketSocket {
     fn is_fresh(&self) -> bool {
         false
     }
+}
+pub struct Packet {
+    pub buf: Bytes,
+    pub addr: SocketAddr,
 }
 #[derive(Error, Debug)]
 pub enum PacketSocketError {
@@ -42,6 +49,51 @@ pub enum PacketSocketError {
 pub struct ReceiveResult {
     pub len: u32,
     pub saddr: SocketAddr,
+}
+
+pub struct EnetPacketSocket {
+    wrapper: PacketSocketWrapper,
+}
+impl PacketSocket for EnetPacketSocket {
+    fn get_addr(&self) -> io::Result<SocketAddr> {
+        self.wrapper.get_addr()
+    }
+
+    fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
+        let res = self.wrapper.send(addr, bytes);
+        let _ = self.wrapper.poll();
+        res
+    }
+
+    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult> {
+        let _ = self.wrapper.poll();
+        self.wrapper.receive(buffer)
+    }
+
+    fn poll(&mut self) -> io::Result<()> {
+        // unimplemented!("Enet polls on send and receive respectively")
+        self.wrapper.poll()
+    }
+}
+impl EnetPacketSocket {
+    pub fn new() -> Self {
+        // println!("{}",to_enet_addr(&("127.0.0.1:9001".parse().unwrap())).port);
+        EnetPacketSocket {
+            wrapper: PacketSocketWrapper::new(),
+        }
+    }
+
+    pub fn bind(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
+        let res = self.wrapper.bind(addr);
+        let _ = self.wrapper.poll();
+        res
+    }
+
+    pub fn connect(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
+        let res = self.wrapper.connect(addr);
+        let _ = self.wrapper.poll();
+        res
+    }
 }
 
 pub struct PacketSocketWrapper {
@@ -68,6 +120,7 @@ impl PacketSocket for PacketSocketWrapper {
 
 impl PacketSocketWrapper {
     pub fn new() -> Self {
+        // println!("{}",to_enet_addr(&("127.0.0.1:9001".parse().unwrap())).port);
         PacketSocketWrapper {
             inner: Box::new(FreshSocket {}),
         }

@@ -7,9 +7,9 @@ use std::os::raw::c_void;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::socket::{PacketSocket, PacketSocketWrapper};
+use crate::socket::{EnetPacketSocket as EnetPacketSocketWrapper, PacketSocket};
 
-pub type EnetPacketSocket = PacketSocketWrapper;
+pub type EnetPacketSocket = EnetPacketSocketWrapper;
 
 pub fn force_link_symbols() {}
 
@@ -92,9 +92,9 @@ pub extern "C" fn enet_socket_create(tpe: ENetSocketType) -> ENetSocket {
     if tpe != _ENetSocketType_ENET_SOCKET_TYPE_DATAGRAM {
         unimplemented!("Nope")
     }
-    let sock = Box::new(PacketSocketWrapper::new());
+    let sock = Box::new(EnetPacketSocketWrapper::new());
     let f = Box::into_raw(sock) as *mut c_void;
-    trace!("sock: {:p}", f as *mut PacketSocketWrapper);
+    trace!("sock: {:p}", f as *mut EnetPacketSocketWrapper);
     f
 }
 
@@ -103,7 +103,7 @@ pub extern "C" fn enet_socket_bind(
     sock: ENetSocket,
     addr: *const ENetAddress,
 ) -> ::std::os::raw::c_int {
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     let addr = unsafe { &*(addr as *const ENetAddress) };
 
     let addr = from_enet_addr(addr);
@@ -124,7 +124,7 @@ pub extern "C" fn enet_socket_get_address(
     sock: ENetSocket,
     addr: *mut ENetAddress,
 ) -> ::std::os::raw::c_int {
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     let addr = unsafe { &mut *(addr as *mut ENetAddress) };
     match sock.get_addr() {
         Ok(saddr) => {
@@ -146,7 +146,9 @@ pub extern "C" fn enet_socket_send(
     buffer_cnt: usize,
 ) -> ::std::os::raw::c_int {
     // todo: vectored writes?
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    // trace!("enet_socket_send");
+
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     let addr = unsafe { &mut *(addr as *mut ENetAddress) };
     let addr = SocketAddr::new(IpAddr::V4(addr.host.to_ne_bytes().into()), addr.port);
 
@@ -175,9 +177,9 @@ pub extern "C" fn enet_socket_receive(
     buf: *mut ENetBuffer,
     buffer_cnt: usize,
 ) -> ::std::os::raw::c_int {
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     let addr = unsafe { &mut *(addr as *mut ENetAddress) };
-    // warn!("enet_socket_receive");
+    // println!("enet_socket_receive");
 
     let buf = unsafe { &*slice_from_raw_parts(buf, buffer_cnt) };
 
@@ -208,7 +210,7 @@ pub extern "C" fn enet_socket_connect(
     sock: ENetSocket,
     addr: *const ENetAddress,
 ) -> ::std::os::raw::c_int {
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     let addr = unsafe { &*(addr as *const ENetAddress) };
     let addr = from_enet_addr(addr);
     warn!("enet_socket_connect{}", addr);
@@ -281,7 +283,7 @@ pub extern "C" fn enet_socket_wait(
 ) -> ::std::os::raw::c_int {
     // todo poll instead of busy looping
     // warn!("enet_socket_wait");
-    let sock = unsafe { &mut *(sock as *mut PacketSocketWrapper) };
+    let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
     sock.poll();
     0
 }

@@ -1,14 +1,19 @@
+use bytes::{BufMut, BytesMut};
 use log::{trace, warn};
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
 use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslRef, SslStream};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
+use std::slice::from_raw_parts_mut;
+use std::time::Duration;
 
+use crate::protocol::{EnetDissector, EnetPacket};
 use crate::socket::connections::Connections;
-use crate::{PacketSocket, ReceiveResult};
+use crate::{Packet, PacketSocket, ReceiveResult};
 
 const LISTENER: Token = Token(0);
 
@@ -28,6 +33,9 @@ struct State {
     addr: SocketAddr,
     connections: Connections,
     listener: UdpSocket,
+    buffer: BytesMut,
+    receive_queue: VecDeque<Packet>,
+    send_queue: VecDeque<Packet>,
 }
 
 impl State {
@@ -75,10 +83,15 @@ impl State {
 
         let mut mio_udp = UdpSocket::from_std(c_sock.into());
 
-        let entry = self.connections.vacant_entry();
+        let entry = self.connections.vacant_entry(src);
         let token = Token(entry.key() + 1);
+        let con_id = entry.key();
 
-        registry.register(&mut mio_udp, token, Interest::READABLE)?;
+        registry.register(
+            &mut mio_udp,
+            token,
+            Interest::READABLE.add(Interest::WRITABLE),
+        )?;
 
         let wrapper = MioUdpWrapper(mio_udp);
         let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
@@ -104,7 +117,9 @@ impl State {
 
         entry.insert(Client {
             ssl_stream,
-            buffer: vec![0u8; 4096],
+            addr: src,
+            con_id,
+            send_buffer: VecDeque::new(),
         });
 
         Ok(())
@@ -113,21 +128,44 @@ impl State {
     fn handle_packet_on_existing_connection(&mut self, token: Token) {
         trace!("Token matching");
 
+        if self.buffer.remaining_mut() < 1024 {
+            self.buffer.reserve(4096);
+        }
+
         let client_idx = token.0 - 1;
         let mut should_remove = false;
 
         if let Some(client) = self.connections.get_mut(client_idx) {
-            // Use the persistent buffer instead of stack allocation
-            match client.ssl_stream.read(&mut client.buffer) {
+            let slice = self.buffer.chunk_mut();
+
+            // safety: the uninitalized memory is passed to openssl and we must only read from it
+            let outcome = unsafe {
+                let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
+                match client.ssl_stream.read(buffer) {
+                    Ok(len) => {
+                        self.buffer.advance_mut(len);
+                        Ok(len)
+                    }
+                    e => e,
+                }
+            };
+
+            match outcome {
                 Ok(len) => {
-                    trace!("RECEIVED {:?}", &client.buffer[..len]);
-                    let _ = client.ssl_stream.write_all(&client.buffer[..len]);
+                    let buf = self.buffer.split_to(len).freeze();
+                    // trace!("RECEIVED {:?}", &buf[..]);
+                    self.receive_queue.push_back(Packet {
+                        buf,
+                        addr: client.addr,
+                    });
+                    // client.buffers.push_back(buf);
+                    // let _ = client.ssl_stream.write_all(&client.buffer[..len]);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    trace!("Would block");
+                    // trace!("Would block");
                 }
                 Err(e) => {
-                    trace!("Removing: {e}");
+                    trace!("Removing [{}]: {e}", client.addr);
                     should_remove = true
                 }
             }
@@ -141,15 +179,45 @@ impl State {
 
 impl PacketSocket for ServerDtlsSocket {
     fn get_addr(&self) -> io::Result<SocketAddr> {
-        todo!()
+        Ok(self.state.addr)
     }
 
-    fn send(&mut self, _addr: SocketAddr, _bytes: &[u8]) -> io::Result<()> {
-        todo!()
+    fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
+        // fuck it, we ball: if the socket can't send, drop it
+        match self.state.connections.get_by_ip_mut(addr) {
+            Some(s) => s.ssl_stream.write(bytes).map(|_| ()),
+            None => {
+                println!("Client gone");
+                Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "client vanished",
+                ))
+            }
+        }
+
+        // todo limit size of queue
+        // let x = self.state.connections.get_by_ip_mut(addr).unwrap();
+        // self.state.send_queue.push_back(Packet { buf: (), addr: () });
     }
 
-    fn receive(&mut self, _buffer: &mut [u8]) -> io::Result<ReceiveResult> {
-        todo!()
+    fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult> {
+        // trace!("receive");
+        match self.state.receive_queue.pop_front() {
+            Some(pkt) => {
+                trace!(
+                    "received pkt: {}: {}",
+                    pkt.buf.len(),
+                    EnetDissector::parse(&pkt.buf).unwrap()
+                );
+                let len = pkt.buf.len();
+                buffer[..len].clone_from_slice(&pkt.buf);
+                Ok(ReceiveResult {
+                    len: len as u32,
+                    saddr: pkt.addr,
+                })
+            }
+            None => Err(io::Error::new(io::ErrorKind::WouldBlock, "would block")),
+        }
     }
 
     fn poll(&mut self) -> io::Result<()> {
@@ -159,14 +227,17 @@ impl PacketSocket for ServerDtlsSocket {
             state,
         } = self;
 
-        mio_stuff.poll.poll(&mut mio_stuff.events, None)?;
+        mio_stuff
+            .poll
+            .poll(&mut mio_stuff.events, Some(Duration::from_micros(1)))?;
 
         // todo, receive globals here
 
         for event in mio_stuff.events.iter() {
             match event.token() {
                 LISTENER => {
-                    state.handle_packet_on_new_connection(tls_stuff, mio_stuff.poll.registry());
+                    let _ =
+                        state.handle_packet_on_new_connection(tls_stuff, mio_stuff.poll.registry());
                 }
                 token => {
                     state.handle_packet_on_existing_connection(token);
@@ -213,6 +284,9 @@ impl ServerDtlsSocket {
                 connections,
                 listener,
                 addr,
+                buffer: BytesMut::with_capacity(1024 * 1024),
+                receive_queue: VecDeque::new(),
+                send_queue: VecDeque::new(),
             },
         };
         Ok(res)
@@ -220,8 +294,10 @@ impl ServerDtlsSocket {
 }
 
 pub struct Client {
+    pub(crate) addr: SocketAddr,
     ssl_stream: SslStream<MioUdpWrapper>,
-    buffer: Vec<u8>,
+    con_id: usize,
+    send_buffer: VecDeque<Packet>,
 }
 
 #[derive(Debug)]

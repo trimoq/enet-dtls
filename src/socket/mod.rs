@@ -1,7 +1,10 @@
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::socket::client::ClientDtlsSocket;
@@ -13,9 +16,69 @@ mod connections;
 mod fresh;
 mod server;
 
+#[derive(Clone, Debug)]
+pub struct CookieConfig {
+    pub enabled: bool,
+    pub secret: [u64; 2],
+}
+
+impl Default for CookieConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            secret: [0x4141414141414141, 0x4141414141414141],
+        }
+    }
+}
+
+pub struct CookieConfigHandle {
+    config: Arc<ArcSwap<CookieConfig>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl CookieConfigHandle {
+    pub fn new(config: CookieConfig) -> Self {
+        Self {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn update(&self, config: CookieConfig) {
+        self.config.store(Arc::new(config));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn load(&self) -> arc_swap::Guard<Arc<CookieConfig>> {
+        self.config.load()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+}
+
+impl Clone for CookieConfigHandle {
+    fn clone(&self) -> Self {
+        Self {
+            config: Arc::clone(&self.config),
+            generation: Arc::clone(&self.generation),
+        }
+    }
+}
+
 pub struct ServerTlsOptions {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    pub cookie: CookieConfigHandle,
+}
+impl Default for ServerTlsOptions{
+    fn default() -> Self {
+        Self { 
+            cert_path: Default::default(), 
+            key_path: Default::default(), 
+            cookie: CookieConfigHandle::new(CookieConfig::default()) }
+    }
 }
 
 pub struct ClientTlsOptions {
@@ -74,6 +137,14 @@ impl PacketSocket for EnetPacketSocket {
     }
 
     fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
+        // special handling for connect, as enet does not bother to conenct before send
+        if self.wrapper.is_fresh(){
+            let tls = ClientTlsOptions {         
+                ca_cert_path: "test_data/server_cert.pem".into(),
+                domain: "localhost".into(),
+             };
+            self.connect(addr, tls).unwrap();
+        }
         let res = self.wrapper.send(addr, bytes);
         let _ = self.wrapper.poll();
         res
@@ -129,6 +200,9 @@ impl PacketSocket for PacketSocketWrapper {
 
     fn poll(&mut self) -> io::Result<()> {
         self.inner.poll()
+    }
+    fn is_fresh(&self) -> bool {
+        self.inner.is_fresh()
     }
 }
 

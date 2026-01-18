@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::Write;
 use std::{
     net::Ipv4Addr,
@@ -7,7 +8,8 @@ use std::{
 };
 
 use enet::{Address, BandwidthLimit, ChannelLimit, Enet, Event, Packet, PacketMode};
-use enet_dtls::PacketSocketWrapper;
+use enet_dtls::ffi::set_server_tls_options;
+use enet_dtls::{CookieConfig, CookieConfigHandle, PacketSocketWrapper, ServerTlsOptions};
 use log::{info, warn};
 
 fn main() {
@@ -19,11 +21,22 @@ fn main() {
     env_logger::Builder::from_default_env()
         .format_timestamp_millis()
         .init();
-    enet_dtls::ffi::force_link_symbols();
+    // enet_dtls::ffi::force_link_symbols();
+
     let enet = Enet::new().unwrap();
 
     let local_addr = Address::new(Ipv4Addr::LOCALHOST, 9001);
-    println!("aasdasdasdas");
+
+    let cch = CookieConfigHandle::new(CookieConfig::default());
+
+    let opt = ServerTlsOptions {
+        cert_path: "test_data/server_cert.pem".into(),
+        key_path: "test_data/server_key.pem".into(),
+        cookie: cch.clone(),
+    };
+
+    set_server_tls_options(opt);
+
 
     let mut host = enet
         .create_host::<()>(
@@ -73,5 +86,10 @@ fn main() {
             thread::sleep(remaining_dur);
         }
         i += 1;
+
+        if i % 10_000 == 0 {
+            cch.update(CookieConfig::default());
+        }
+
     }
 }

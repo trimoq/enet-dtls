@@ -2,18 +2,19 @@ use bytes::{BufMut, BytesMut};
 use log::{trace, warn};
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
-use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslRef, SslStream};
+use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslStream};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 
 use crate::protocol::EnetDissector;
 use crate::socket::connections::Connections;
-use crate::socket::ServerSocketOptions;
+use crate::socket::{CookieConfig, CookieConfigHandle, ServerSocketOptions};
 use crate::{Packet, PacketSocket, ReceiveResult};
 
 const LISTENER: Token = Token(0);
@@ -29,7 +30,60 @@ struct MioStuff {
 }
 struct TlsStuff {
     acc: SslAcceptor,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    cookie_handle: CookieConfigHandle,
+    cookie_generation: u64,
 }
+
+fn secret_to_bytes(secret: [u64; 2]) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&secret[0].to_le_bytes());
+    bytes[8..].copy_from_slice(&secret[1].to_le_bytes());
+    bytes
+}
+
+impl TlsStuff {
+    fn build_acceptor(
+        cert_path: &PathBuf,
+        key_path: &PathBuf,
+        cookie_config: &CookieConfig,
+    ) -> io::Result<SslAcceptor> {
+        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls_server())?;
+        builder.set_private_key_file(key_path, openssl::ssl::SslFiletype::PEM)?;
+        builder.set_certificate_chain_file(cert_path)?;
+
+        if cookie_config.enabled {
+            let secret = secret_to_bytes(cookie_config.secret);
+            builder.set_options(openssl::ssl::SslOptions::COOKIE_EXCHANGE);
+            builder.set_cookie_generate_cb(move |_ssl, cookie| {
+                trace!("Cookie generated");
+                cookie[..secret.len()].copy_from_slice(&secret);
+                Ok(secret.len())
+            });
+            let secret = secret_to_bytes(cookie_config.secret);
+            builder.set_cookie_verify_cb(move |_ssl, cookie| {
+                let res = cookie == secret;
+                trace!("Cookie verified: {res}");
+                res
+            });
+        }
+
+        Ok(builder.build())
+    }
+
+    fn check_and_rebuild(&mut self) -> io::Result<()> {
+        let new_gen = self.cookie_handle.generation();
+        if new_gen != self.cookie_generation {
+            let config = self.cookie_handle.load();
+            self.acc = Self::build_acceptor(&self.cert_path, &self.key_path, &config)?;
+            self.cookie_generation = new_gen;
+            trace!("Rebuilt TLS acceptor with new cookie config");
+        }
+        Ok(())
+    }
+}
+
 struct State {
     addr: SocketAddr,
     connections: Connections,
@@ -56,7 +110,7 @@ impl State {
         trace!("New accept: {:?}", &recv_buf[..len]);
 
         let mut ssl = Ssl::new(&ctx).unwrap();
-        let ssl_ref: &mut SslRef = &mut ssl;
+        let ssl_ref = &mut ssl;
 
         let is_verified = unsafe {
             let bio = openssl_sys::BIO_new_dgram(self.listener.as_raw_fd(), 0);
@@ -70,7 +124,6 @@ impl State {
 
         if !is_verified {
             trace!("Unverified cookie, dropping");
-            // let _ = self.listener.recv_from(&mut recv_buf);
             return Ok(());
         }
 
@@ -228,11 +281,11 @@ impl PacketSocket for ServerDtlsSocket {
             state,
         } = self;
 
+        tls_stuff.check_and_rebuild()?;
+
         mio_stuff
             .poll
             .poll(&mut mio_stuff.events, Some(Duration::from_micros(1)))?;
-
-        // todo, receive globals here
 
         for event in mio_stuff.events.iter() {
             match event.token() {
@@ -255,15 +308,9 @@ impl ServerDtlsSocket {
         let poll = Poll::new()?;
         let events = Events::with_capacity(128);
 
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls_server())?;
-        builder.set_private_key_file(&opts.tls.key_path, openssl::ssl::SslFiletype::PEM)?;
-        builder.set_certificate_chain_file(&opts.tls.cert_path)?;
-
-        builder.set_options(openssl::ssl::SslOptions::COOKIE_EXCHANGE);
-        builder.set_cookie_generate_cb(generate_cookie);
-        builder.set_cookie_verify_cb(verify_cookie);
-
-        let acc = builder.build();
+        let cookie_config = opts.tls.cookie.load();
+        let acc = TlsStuff::build_acceptor(&opts.tls.cert_path, &opts.tls.key_path, &cookie_config)?;
+        let cookie_generation = opts.tls.cookie.generation();
 
         let l_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         l_sock.set_reuse_address(true)?;
@@ -278,7 +325,13 @@ impl ServerDtlsSocket {
 
         let res = ServerDtlsSocket {
             mio_stuff: MioStuff { poll, events },
-            tls_stuff: TlsStuff { acc },
+            tls_stuff: TlsStuff {
+                acc,
+                cert_path: opts.tls.cert_path,
+                key_path: opts.tls.key_path,
+                cookie_handle: opts.tls.cookie,
+                cookie_generation,
+            },
             state: State {
                 connections,
                 listener,
@@ -318,19 +371,3 @@ impl Write for MioUdpWrapper {
     }
 }
 
-fn generate_cookie(
-    _ssl: &mut SslRef,
-    cookie: &mut [u8],
-) -> Result<usize, openssl::error::ErrorStack> {
-    trace!("Cookie generataed");
-    let secret = b"AAAAAAAAAAAAAAAA";
-    cookie[..secret.len()].copy_from_slice(secret);
-    Ok(secret.len())
-}
-
-fn verify_cookie(_ssl: &mut SslRef, cookie: &[u8]) -> bool {
-    let secret = b"AAAAAAAAAAAAAAAA";
-    let res = cookie == secret;
-    trace!("Cookie verified: {res}");
-    res
-}

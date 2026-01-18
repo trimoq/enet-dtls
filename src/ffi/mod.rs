@@ -1,6 +1,7 @@
 use bytes::{BufMut, BytesMut};
 use enet_sys::*;
 use log::{debug, error, trace, warn};
+use std::cell::RefCell;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::raw::c_void;
@@ -8,8 +9,8 @@ use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::socket::{
-    ClientTlsOptions, EnetPacketSocket as EnetPacketSocketWrapper, PacketSocket,
-    ServerSocketOptions, ServerTlsOptions,
+    ClientTlsOptions, CookieConfig, CookieConfigHandle, EnetPacketSocket as EnetPacketSocketWrapper,
+    PacketSocket, ServerSocketOptions, ServerTlsOptions,
 };
 
 pub type EnetPacketSocket = EnetPacketSocketWrapper;
@@ -101,6 +102,14 @@ pub extern "C" fn enet_socket_create(tpe: ENetSocketType) -> ENetSocket {
     f
 }
 
+thread_local! {
+    pub static BAR: RefCell<ServerTlsOptions> = RefCell::new(ServerTlsOptions::default());
+}
+
+pub fn set_server_tls_options(opt: ServerTlsOptions){
+    BAR.set(opt);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn enet_socket_bind(
     sock: ENetSocket,
@@ -110,12 +119,10 @@ pub extern "C" fn enet_socket_bind(
     let addr = unsafe { &*(addr as *const ENetAddress) };
 
     let addr = from_enet_addr(addr);
+    let tsl_opt = BAR.take();
     let opts = ServerSocketOptions {
         addr,
-        tls: ServerTlsOptions {
-            cert_path: "test_data/server_cert.pem".into(),
-            key_path: "test_data/server_key.pem".into(),
-        },
+        tls: tsl_opt
     };
     match sock.bind(opts) {
         Ok(_) => {

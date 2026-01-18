@@ -1,4 +1,7 @@
-use enet_dtls::{PacketSocket, PacketSocketWrapper, ServerSocketOptions, ServerTlsOptions};
+use enet_dtls::{
+    CookieConfig, CookieConfigHandle, PacketSocket, PacketSocketWrapper, ServerSocketOptions,
+    ServerTlsOptions,
+};
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -11,6 +14,7 @@ fn main() {
         tls: ServerTlsOptions {
             cert_path: "test_data/server_cert.pem".into(),
             key_path: "test_data/server_key.pem".into(),
+            cookie: CookieConfigHandle::new(CookieConfig::default()),
         },
     };
     p.bind(opts).unwrap();

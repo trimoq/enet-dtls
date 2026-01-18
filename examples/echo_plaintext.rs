@@ -2,6 +2,7 @@ use enet_dtls::{
     PacketSocket, PacketSocketWrapper, ServerSocketOptions,
     tls::{CookieConfig, CookieConfigHandle, ServerTlsOptions},
 };
+use log::{info, warn};
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -18,8 +19,18 @@ fn main() {
         },
     };
     p.bind(opts).unwrap();
+    let mut buf = vec![0;1024];
     loop {
         p.poll().unwrap();
+        match p.receive(&mut buf){
+            Ok(o) => {
+                info!("Received from {} {:?}", o.saddr, &buf[..(o.len as usize)]);
+                p.send(o.saddr, &buf[..(o.len as usize)]).unwrap();
+            },
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::WouldBlock=> {/* ignore */},
+                _ => {warn!("e: {e}")},
+            },
+        }
     }
-    println!("done")
 }

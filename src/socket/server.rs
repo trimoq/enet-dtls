@@ -99,16 +99,15 @@ impl State {
         registry: &Registry,
     ) -> io::Result<()> {
         let mut recv_buf = [0u8; 1500];
-        let ctx = tls.acc.context();
-
+        
         let (len, src) = match self.listener.peek_from(&mut recv_buf) {
             Ok(v) => v,
             Err(_) => return Ok(()),
         };
-
+        
         trace!("New accept: {:?}", &recv_buf[..len]);
-
-        let mut ssl = Ssl::new(&ctx).unwrap();
+        
+        let mut ssl = Ssl::new(&tls.acc.context()).unwrap();
         let ssl_ref = &mut ssl;
 
         let is_verified = unsafe {
@@ -147,6 +146,7 @@ impl State {
         )?;
 
         let wrapper = MioUdpWrapper(mio_udp);
+
         let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
             warn!("SSL stream crreation failed");
             io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
@@ -167,9 +167,14 @@ impl State {
                 }
             }
         }
+        let stream = Box::new(ssl_stream);
+
+        // let stream = Box::new(wrapper);
+
 
         entry.insert(Client {
-            ssl_stream,
+            // ssl_stream,
+            stream,
             addr: src,
             con_id,
         });
@@ -194,7 +199,7 @@ impl State {
             // safety: the uninitalized memory is passed to openssl and we must only read from it
             let outcome = unsafe {
                 let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
-                match client.ssl_stream.read(buffer) {
+                match client.stream.read(buffer) {
                     Ok(len) => {
                         self.buffer.advance_mut(len);
                         Ok(len)
@@ -206,16 +211,14 @@ impl State {
             match outcome {
                 Ok(len) => {
                     let buf = self.buffer.split_to(len).freeze();
-                    // trace!("RECEIVED {:?}", &buf[..]);
+                    trace!("RECEIVED {:?}", &buf[..]);
                     self.receive_queue.push_back(Packet {
                         buf,
                         addr: client.addr,
                     });
-                    // client.buffers.push_back(buf);
-                    // let _ = client.ssl_stream.write_all(&client.buffer[..len]);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    // trace!("Would block");
+                    trace!("Would block");
                 }
                 Err(e) => {
                     trace!("Removing [{}]: {e}", client.addr);
@@ -238,7 +241,7 @@ impl PacketSocket for ServerDtlsSocket {
     fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
         // fuck it, we ball: if the socket can't send, drop it
         match self.state.connections.get_by_ip_mut(addr) {
-            Some(s) => s.ssl_stream.write(bytes).map(|_| ()),
+            Some(s) => s.stream.write(bytes).map(|_| ()),
             None => {
                 println!("Client gone");
                 Err(io::Error::new(
@@ -247,21 +250,17 @@ impl PacketSocket for ServerDtlsSocket {
                 ))
             }
         }
-
-        // todo limit size of queue
-        // let x = self.state.connections.get_by_ip_mut(addr).unwrap();
-        // self.state.send_queue.push_back(Packet { buf: (), addr: () });
     }
 
     fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult> {
         // trace!("receive");
         match self.state.receive_queue.pop_front() {
             Some(pkt) => {
-                trace!(
-                    "received pkt: {}: {}",
-                    pkt.buf.len(),
-                    EnetDissector::parse(&pkt.buf).unwrap()
-                );
+                // trace!(
+                //     "received pkt: {}: {}",
+                //     pkt.buf.len(),
+                //     EnetDissector::parse(&pkt.buf).unwrap()
+                // );
                 let len = pkt.buf.len();
                 buffer[..len].clone_from_slice(&pkt.buf);
                 Ok(ReceiveResult {
@@ -346,9 +345,19 @@ impl ServerDtlsSocket {
 
 pub struct Client {
     pub(crate) addr: SocketAddr,
-    ssl_stream: SslStream<MioUdpWrapper>,
+    // ssl_stream: SslStream<MioUdpWrapper>,
+    stream: Box<dyn ReadWrite>,
     con_id: usize,
 }
+
+trait ReadWrite: Read + Write{
+
+}
+impl<S: Read + Write> ReadWrite for S {
+
+}
+
+
 
 #[derive(Debug)]
 pub struct MioUdpWrapper(pub UdpSocket);

@@ -29,7 +29,7 @@ pub struct ClientDtlsSocket {
 
 impl ClientDtlsSocket {
     pub fn connect(addr: SocketAddr, tls: ClientTlsOptions) -> io::Result<Self> {
-        let poll = Poll::new()?;
+        let mut poll = Poll::new()?;
         let events = Events::with_capacity(128);
 
         let cert_pem = std::fs::read(&tls.ca_cert_path)?;
@@ -51,6 +51,7 @@ impl ClientDtlsSocket {
 
         let mut mio_udp = UdpSocket::from_std(sock.into());
 
+        // Register with both READABLE and WRITABLE for handshake
         poll.registry().register(
             &mut mio_udp,
             SOCKET,
@@ -61,6 +62,7 @@ impl ClientDtlsSocket {
         let ssl = connector.configure()?.into_ssl(&tls.domain)?;
         let mut ssl_stream = SslStream::new(ssl, wrapper)?;
 
+        let mut handshake_events = Events::with_capacity(8);
         loop {
             match ssl_stream.connect() {
                 Ok(_) => {
@@ -70,7 +72,8 @@ impl ClientDtlsSocket {
                 Err(e) => match e.code() {
                     ErrorCode::WANT_READ | ErrorCode::WANT_WRITE => {
                         trace!("Handshake in progress: {:?}", e.code());
-                        std::thread::sleep(Duration::from_millis(1));
+                        // Wait for socket readiness using mio poll instead of sleeping
+                        poll.poll(&mut handshake_events, Some(Duration::from_millis(100)))?;
                     }
                     _ => {
                         return Err(io::Error::new(
@@ -81,6 +84,9 @@ impl ClientDtlsSocket {
                 },
             }
         }
+
+        poll.registry()
+            .reregister(ssl_stream.get_mut().inner_mut(), SOCKET, Interest::READABLE)?;
 
         Ok(ClientDtlsSocket {
             poll,
@@ -94,34 +100,40 @@ impl ClientDtlsSocket {
     }
 
     fn do_receive(&mut self) {
-        if self.buffer.remaining_mut() < 1024 {
-            self.buffer.reserve(4096);
-        }
+        // Read until WouldBlock to drain the socket
+        loop {
+            if self.buffer.remaining_mut() < 1024 {
+                self.buffer.reserve(4096);
+            }
 
-        let slice = self.buffer.chunk_mut();
-        let outcome = unsafe {
-            let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
-            match self.ssl_stream.read(buffer) {
-                Ok(len) => {
-                    self.buffer.advance_mut(len);
-                    Ok(len)
+            let slice = self.buffer.chunk_mut();
+            let outcome = unsafe {
+                let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
+                match self.ssl_stream.read(buffer) {
+                    Ok(len) => {
+                        self.buffer.advance_mut(len);
+                        Ok(len)
+                    }
+                    e => e,
                 }
-                e => e,
-            }
-        };
+            };
 
-        match outcome {
-            Ok(len) => {
-                let buf = self.buffer.split_to(len).freeze();
-                trace!("Client received {} bytes", len);
-                self.receive_queue.push_back(Packet {
-                    buf,
-                    addr: self.server_addr,
-                });
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(e) => {
-                trace!("Receive error: {e}");
+            match outcome {
+                Ok(len) => {
+                    let buf = self.buffer.split_to(len).freeze();
+                    trace!("Client received {} bytes", len);
+                    self.receive_queue.push_back(Packet {
+                        buf,
+                        addr: self.server_addr,
+                    });
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(e) => {
+                    trace!("Receive error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -153,7 +165,7 @@ impl PacketSocket for ClientDtlsSocket {
 
     fn poll(&mut self) -> io::Result<()> {
         self.poll
-            .poll(&mut self.events, Some(Duration::from_micros(1)))?;
+            .poll(&mut self.events, Some(Duration::from_millis(10)))?;
 
         let should_receive = self
             .events

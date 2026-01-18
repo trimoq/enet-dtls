@@ -113,74 +113,87 @@ struct State {
 }
 
 impl State {
-    fn handle_packet_on_new_connection(
+    fn handle_ready_on_new_connection(
         &mut self,
         tls: &TlsStuff,
         registry: &Registry,
     ) -> io::Result<()> {
-        let mut recv_buf = [0u8; 1500];
-        let (len, src) = match self.listener.peek_from(&mut recv_buf) {
-            Ok(v) => v,
-            Err(_) => return Ok(()),
-        };
-        trace!("New accept: {:?}", &recv_buf[..len]);
-
-        if tls.tls_enabled {
-            trace!("TLS is enabled");
-            let (ssl, is_verified) = self.fun_name(tls);
-            if !is_verified {
-                trace!("Unverified packet, dropping");
-                return Ok(());
-            }
-
-            trace!("Verified packet, begin client setup");
-
-            let (entry, con_id, wrapper) = self.hannes(registry, src)?;
-            let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
-                warn!("SSL stream crreation failed");
-                io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
-            })?;
-            match ssl_stream.accept() {
-                Ok(_) => {
-                    trace!("Handshake accept ok")
+        loop {
+            let mut recv_buf = [0u8; 1500];
+            let (len, src) = match self.listener.peek_from(&mut recv_buf) {
+                Ok(v) => v,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    trace!("No more pending connections");
+                    break;
                 }
-                Err(e) => {
-                    trace!("Hanshake accept err: {e}");
-                    match e.code() {
-                        ErrorCode::WANT_READ => trace!("Read would have blocked"),
-                        ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
-                        _ => {
-                            warn!("Other error occured");
-                            return Ok(());
+                Err(_) => break,
+            };
+
+            if tls.tls_enabled {
+                // TLS path: handle one connection at a time due to DTLS handshake complexity
+                let mut recv_buf = [0u8; 1500];
+                let (len, src) = match self.listener.peek_from(&mut recv_buf) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(()),
+                };
+                trace!("New accept (TLS): {:?}", &recv_buf[..len]);
+
+                trace!("TLS is enabled");
+                let (ssl, is_verified) = self.fun_name(tls);
+                if !is_verified {
+                    trace!("Unverified packet, dropping");
+                    return Ok(());
+                }
+
+                trace!("Verified packet, begin client setup");
+
+                let (entry, con_id, wrapper) = self.hannes(registry, src)?;
+                let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
+                    warn!("SSL stream crreation failed");
+                    io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
+                })?;
+                match ssl_stream.accept() {
+                    Ok(_) => {
+                        trace!("Handshake accept ok")
+                    }
+                    Err(e) => {
+                        trace!("Hanshake accept err: {e}");
+                        match e.code() {
+                            ErrorCode::WANT_READ => trace!("Read would have blocked"),
+                            ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
+                            _ => {
+                                warn!("Other error occured");
+                                return Ok(());
+                            }
                         }
                     }
                 }
+                entry.insert(Client {
+                    stream: Box::new(ssl_stream),
+                    addr: src,
+                    con_id,
+                });
+            } else {
+                trace!("New accept (plaintext): {:?}", &recv_buf[..len]);
+
+                trace!("TLS is DISABLED");
+
+                // Consume the packet from the listener (peek_from only peeked it)
+                let mut first_packet = vec![0u8; len];
+                let _ = self.listener.recv_from(&mut first_packet)?;
+
+                let (entry, con_id, wrapper) = self.hannes(registry, src)?;
+                entry.insert(Client {
+                    stream: Box::new(wrapper),
+                    addr: src,
+                    con_id,
+                });
+
+                self.receive_queue.push_back(Packet {
+                    buf: bytes::Bytes::copy_from_slice(&first_packet),
+                    addr: src,
+                });
             }
-            entry.insert(Client {
-                // ssl_stream,
-                stream: Box::new(ssl_stream),
-                addr: src,
-                con_id,
-            });
-        } else {
-            trace!("TLS is DISABLED");
-            trace!("Verified client, begin client setup");
-
-            // Consume the packet from the listener (peek_from only peeked it, openssl would read it for handshake init)
-            let mut first_packet = vec![0u8; len];
-            let _ = self.listener.recv_from(&mut first_packet)?;
-
-            let (entry, con_id, wrapper) = self.hannes(registry, src)?;
-            entry.insert(Client {
-                stream: Box::new(wrapper),
-                addr: src,
-                con_id,
-            });
-
-            self.receive_queue.push_back(Packet {
-                buf: bytes::Bytes::copy_from_slice(&first_packet),
-                addr: src,
-            });
         }
 
         Ok(())
@@ -201,11 +214,7 @@ impl State {
         let entry = self.connections.vacant_entry(src);
         let token = Token(entry.key() + 1);
         let con_id = entry.key();
-        registry.register(
-            &mut mio_udp,
-            token,
-            Interest::READABLE.add(Interest::WRITABLE),
-        )?;
+        registry.register(&mut mio_udp, token, Interest::READABLE)?;
         let wrapper = MioUdpWrapper(mio_udp);
         Ok((entry, con_id, wrapper))
     }
@@ -235,44 +244,51 @@ impl State {
     fn handle_packet_on_existing_connection(&mut self, token: Token) {
         trace!("Token matching");
 
-        if self.buffer.remaining_mut() < 1024 {
-            self.buffer.reserve(4096);
-        }
-
         let client_idx = token.0 - 1;
         let mut should_remove = false;
 
         if let Some(client) = self.connections.get_mut(client_idx) {
             trace!("Handling client [{}]", client.con_id);
-            let slice = self.buffer.chunk_mut();
+            let client_addr = client.addr;
 
-            // safety: the uninitalized memory is passed to openssl and we must only read from it
-            let outcome = unsafe {
-                let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
-                match client.stream.read(buffer) {
-                    Ok(len) => {
-                        self.buffer.advance_mut(len);
-                        Ok(len)
+            // Read until WouldBlock to drain the socket
+            loop {
+                if self.buffer.remaining_mut() < 1024 {
+                    self.buffer.reserve(4096);
+                }
+
+                let slice = self.buffer.chunk_mut();
+
+                // safety: the uninitalized memory is passed to openssl and we must only read from it
+                let outcome = unsafe {
+                    let buffer = from_raw_parts_mut(slice.as_mut_ptr(), slice.len());
+                    match client.stream.read(buffer) {
+                        Ok(len) => {
+                            self.buffer.advance_mut(len);
+                            Ok(len)
+                        }
+                        e => e,
                     }
-                    e => e,
-                }
-            };
+                };
 
-            match outcome {
-                Ok(len) => {
-                    let buf = self.buffer.split_to(len).freeze();
-                    trace!("RECEIVED {:?}", &buf[..]);
-                    self.receive_queue.push_back(Packet {
-                        buf,
-                        addr: client.addr,
-                    });
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    trace!("Would block");
-                }
-                Err(e) => {
-                    trace!("Removing [{}]: {e}", client.addr);
-                    should_remove = true
+                match outcome {
+                    Ok(len) => {
+                        let buf = self.buffer.split_to(len).freeze();
+                        trace!("RECEIVED {:?}", &buf[..]);
+                        self.receive_queue.push_back(Packet {
+                            buf,
+                            addr: client_addr,
+                        });
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        trace!("Would block, done reading");
+                        break;
+                    }
+                    Err(e) => {
+                        trace!("Removing [{}]: {e}", client_addr);
+                        should_remove = true;
+                        break;
+                    }
                 }
             }
         }
@@ -333,13 +349,16 @@ impl PacketSocket for ServerDtlsSocket {
 
         mio_stuff
             .poll
-            .poll(&mut mio_stuff.events, Some(Duration::from_micros(1)))?;
+            .poll(&mut mio_stuff.events, Some(Duration::from_millis(10)))?;
 
         for event in mio_stuff.events.iter() {
             match event.token() {
                 LISTENER => {
-                    let _ =
-                        state.handle_packet_on_new_connection(tls_stuff, mio_stuff.poll.registry());
+                    if let Err(e) =
+                        state.handle_ready_on_new_connection(tls_stuff, mio_stuff.poll.registry())
+                    {
+                        warn!("Error handling new connection: {e}");
+                    }
                 }
                 token => {
                     state.handle_packet_on_existing_connection(token);
@@ -397,6 +416,12 @@ impl<S: Read + Write> ReadWrite for S {}
 
 #[derive(Debug)]
 pub struct MioUdpWrapper(pub UdpSocket);
+
+impl MioUdpWrapper {
+    pub fn inner_mut(&mut self) -> &mut UdpSocket {
+        &mut self.0
+    }
+}
 
 impl Read for MioUdpWrapper {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {

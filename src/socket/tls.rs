@@ -10,38 +10,63 @@ use arc_swap::ArcSwap;
 
 #[derive(Clone, Debug)]
 pub struct CookieConfig {
-    pub enabled: bool,
-    pub secret: [u64; 2],
+    pub secret: u64,
 }
 
 impl Default for CookieConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            secret: [0x4141414141414141, 0x4141414141414141],
+            secret: 0x4141414141414141,
         }
     }
 }
 
-pub struct CookieConfigHandle {
-    config: Arc<ArcSwap<CookieConfig>>,
+#[derive(Clone, Debug, Default)]
+pub struct CertConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConnectTokenConfig {
+    _secret: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TlsConfig {
+    pub cookies: Option<CookieConfig>,
+    pub connect_token: Option<ConnectTokenConfig>,
+    pub cert: Option<CertConfig>,
+}
+
+impl TlsConfig {
+    pub fn is_tls_enabled(&self) -> bool {
+        self.cert.is_some()
+    }
+    pub fn are_cookies_enabled(&self) -> bool {
+        self.cert.is_some() && self.cookies.is_some()
+    }
+}
+
+pub struct TlsConfigHandle {
+    config: Arc<ArcSwap<TlsConfig>>,
     generation: Arc<AtomicU64>,
 }
 
-impl CookieConfigHandle {
-    pub fn new(config: CookieConfig) -> Self {
+impl TlsConfigHandle {
+    pub fn new(config: TlsConfig) -> Self {
         Self {
             config: Arc::new(ArcSwap::from_pointee(config)),
             generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub fn update(&self, config: CookieConfig) {
+    pub fn update(&self, config: TlsConfig) {
         self.config.store(Arc::new(config));
         self.generation.fetch_add(1, Ordering::Release);
     }
 
-    pub fn load(&self) -> arc_swap::Guard<Arc<CookieConfig>> {
+    pub fn load(&self) -> arc_swap::Guard<Arc<TlsConfig>> {
         self.config.load()
     }
 
@@ -50,7 +75,7 @@ impl CookieConfigHandle {
     }
 }
 
-impl Clone for CookieConfigHandle {
+impl Clone for TlsConfigHandle {
     fn clone(&self) -> Self {
         Self {
             config: Arc::clone(&self.config),
@@ -60,16 +85,25 @@ impl Clone for CookieConfigHandle {
 }
 
 pub struct ServerTlsOptions {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-    pub cookie: CookieConfigHandle,
+    pub handle: TlsConfigHandle,
+}
+
+impl ServerTlsOptions {
+    pub fn new(handle: &TlsConfigHandle) -> Self {
+        ServerTlsOptions {
+            handle: handle.clone(),
+        }
+    }
+    pub fn new_plaintext() -> Self {
+        ServerTlsOptions {
+            handle: TlsConfigHandle::new(TlsConfig::default()),
+        }
+    }
 }
 impl Default for ServerTlsOptions {
     fn default() -> Self {
         Self {
-            cert_path: Default::default(),
-            key_path: Default::default(),
-            cookie: CookieConfigHandle::new(CookieConfig::default()),
+            handle: TlsConfigHandle::new(TlsConfig::default()),
         }
     }
 }

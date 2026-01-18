@@ -1,7 +1,6 @@
 use enet_sys::*;
 use std::net::{IpAddr, SocketAddr};
 
-
 // pub(crate) fn to_enet_addr(saddr: &SocketAddr) -> ENetAddress {
 //     ENetAddress {
 //         host: match saddr.ip() {

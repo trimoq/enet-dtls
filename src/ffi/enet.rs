@@ -255,7 +255,7 @@ pub extern "C" fn enet_socket_wait(
     // todo poll instead of busy looping
     // warn!("enet_socket_wait");
     let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
-    match sock.poll(){
+    match sock.poll() {
         Ok(_) => 0,
         Err(_) => -1,
     }

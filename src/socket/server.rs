@@ -1,5 +1,5 @@
 use bytes::{BufMut, BytesMut};
-use log::{trace, warn};
+use log::{debug, trace, warn};
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
 use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslStream};
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::protocol::EnetDissector;
 use crate::socket::connections::Connections;
-use crate::tls::{CookieConfig, CookieConfigHandle};
+use crate::tls::{CookieConfig, TlsConfig, TlsConfigHandle};
 use crate::{Packet, PacketSocket, ReceiveResult, ServerSocketOptions};
 
 const LISTENER: Token = Token(0);
@@ -29,38 +29,56 @@ struct MioStuff {
     events: Events,
 }
 struct TlsStuff {
+    tls_enabled: bool,
+    cookies_enabled: bool,
+
     acc: SslAcceptor,
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    cookie_handle: CookieConfigHandle,
-    cookie_generation: u64,
+
+    config_handle: TlsConfigHandle,
+    config_generation: u64,
 }
 
-fn secret_to_bytes(secret: [u64; 2]) -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&secret[0].to_le_bytes());
-    bytes[8..].copy_from_slice(&secret[1].to_le_bytes());
+fn secret_to_bytes(secret: u64) -> [u8; 8] {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&secret.to_le_bytes());
     bytes
 }
 
 impl TlsStuff {
-    fn build_acceptor(
-        cert_path: &PathBuf,
-        key_path: &PathBuf,
-        cookie_config: &CookieConfig,
-    ) -> io::Result<SslAcceptor> {
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls_server())?;
-        builder.set_private_key_file(key_path, openssl::ssl::SslFiletype::PEM)?;
-        builder.set_certificate_chain_file(cert_path)?;
+    fn new(acc: SslAcceptor, config_handle: TlsConfigHandle) -> Self {
+        let config_generation = config_handle.generation();
+        let config = config_handle.load();
+        TlsStuff {
+            tls_enabled: config.is_tls_enabled(),
+            cookies_enabled: config.are_cookies_enabled(),
+            acc,
+            config_handle,
+            config_generation,
+        }
+    }
 
-        if cookie_config.enabled {
-            let secret = secret_to_bytes(cookie_config.secret);
+    fn build_acceptor(tls_config: &TlsConfig) -> io::Result<SslAcceptor> {
+        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls_server())?;
+
+        if let Some(cert_config) = &tls_config.cert {
+            builder.set_private_key_file(
+                cert_config.key_path.clone(),
+                openssl::ssl::SslFiletype::PEM,
+            )?;
+            builder.set_certificate_chain_file(cert_config.cert_path.clone())?;
+        }
+
+        if let Some(cookie_config) = &tls_config.cookies {
+            trace!("Configuring with cookies enabled");
             builder.set_options(openssl::ssl::SslOptions::COOKIE_EXCHANGE);
+
+            let secret = secret_to_bytes(cookie_config.secret);
             builder.set_cookie_generate_cb(move |_ssl, cookie| {
                 trace!("Cookie generated");
                 cookie[..secret.len()].copy_from_slice(&secret);
                 Ok(secret.len())
             });
+
             let secret = secret_to_bytes(cookie_config.secret);
             builder.set_cookie_verify_cb(move |_ssl, cookie| {
                 let res = cookie == secret;
@@ -73,12 +91,14 @@ impl TlsStuff {
     }
 
     fn check_and_rebuild(&mut self) -> io::Result<()> {
-        let new_gen = self.cookie_handle.generation();
-        if new_gen != self.cookie_generation {
-            let config = self.cookie_handle.load();
-            self.acc = Self::build_acceptor(&self.cert_path, &self.key_path, &config)?;
-            self.cookie_generation = new_gen;
-            trace!("Rebuilt TLS acceptor with new cookie config");
+        let new_gen = self.config_handle.generation();
+        if new_gen != self.config_generation {
+            let config = self.config_handle.load();
+            self.tls_enabled = config.is_tls_enabled();
+            self.cookies_enabled = config.are_cookies_enabled();
+            self.acc = Self::build_acceptor(&config)?;
+            self.config_generation = new_gen;
+            debug!("Rebuilt TLS acceptor with new config");
         }
         Ok(())
     }
@@ -99,34 +119,69 @@ impl State {
         registry: &Registry,
     ) -> io::Result<()> {
         let mut recv_buf = [0u8; 1500];
-        
         let (len, src) = match self.listener.peek_from(&mut recv_buf) {
             Ok(v) => v,
             Err(_) => return Ok(()),
         };
-        
         trace!("New accept: {:?}", &recv_buf[..len]);
-        
-        let mut ssl = Ssl::new(&tls.acc.context()).unwrap();
-        let ssl_ref = &mut ssl;
 
-        let is_verified = unsafe {
-            let bio = openssl_sys::BIO_new_dgram(self.listener.as_raw_fd(), 0);
-            openssl_sys::SSL_set_bio(ssl_ref.as_ptr(), bio, bio);
-            let bio_addr = openssl_sys::BIO_ADDR_new();
-            use foreign_types_shared::ForeignTypeRef;
-            let res = openssl_sys::DTLSv1_listen(ssl_ref.as_ptr(), bio_addr);
-            trace!("Verify result: {res}");
-            res > 0
-        };
+        if tls.tls_enabled {
+            trace!("TLS is enabled");
+            let (ssl, is_verified) = self.fun_name(tls);
+            if !is_verified {
+                trace!("Unverified packet, dropping");
+                return Ok(());
+            }
 
-        if !is_verified {
-            trace!("Unverified cookie, dropping");
-            return Ok(());
+            trace!("Verified packet, begin client setup");
+
+            let (entry, con_id, wrapper) = self.hannes(registry, src)?;
+            let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
+                warn!("SSL stream crreation failed");
+                io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
+            })?;
+            match ssl_stream.accept() {
+                Ok(_) => {
+                    trace!("Handshake accept ok")
+                }
+                Err(e) => {
+                    trace!("Hanshake accept err: {e}");
+                    match e.code() {
+                        ErrorCode::WANT_READ => trace!("Read would have blocked"),
+                        ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
+                        _ => {
+                            warn!("Other error occured");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            entry.insert(Client {
+                // ssl_stream,
+                stream: Box::new(ssl_stream),
+                addr: src,
+                con_id,
+            });
+        } else {
+            trace!("TLS is DISABLED");
+            trace!("Verified client, begin client setup");
+            let (entry, con_id, wrapper) = self.hannes(registry, src)?;
+            entry.insert(Client {
+                // ssl_stream,
+                stream: Box::new(wrapper),
+                addr: src,
+                con_id,
+            });
         }
 
-        trace!("Verified client, begin client setup");
+        Ok(())
+    }
 
+    fn hannes(
+        &mut self,
+        registry: &Registry,
+        src: SocketAddr,
+    ) -> Result<(slab::VacantEntry<'_, Client>, usize, MioUdpWrapper), io::Error> {
         let c_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         c_sock.set_reuse_address(true)?;
         c_sock.set_nonblocking(true)?;
@@ -134,52 +189,38 @@ impl State {
         c_sock.connect(&src.into())?;
 
         let mut mio_udp = UdpSocket::from_std(c_sock.into());
-
         let entry = self.connections.vacant_entry(src);
         let token = Token(entry.key() + 1);
         let con_id = entry.key();
-
         registry.register(
             &mut mio_udp,
             token,
             Interest::READABLE.add(Interest::WRITABLE),
         )?;
-
         let wrapper = MioUdpWrapper(mio_udp);
+        Ok((entry, con_id, wrapper))
+    }
 
-        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
-            warn!("SSL stream crreation failed");
-            io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
-        })?;
-        match ssl_stream.accept() {
-            Ok(_) => {
-                trace!("Handshake accept ok")
-            }
-            Err(e) => {
-                trace!("Hanshake accept err: {e}");
-                match e.code() {
-                    ErrorCode::WANT_READ => trace!("Read would have blocked"),
-                    ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
-                    _ => {
-                        warn!("Other error occured");
-                        return Ok(());
-                    }
-                }
-            }
+    fn fun_name(&mut self, tls: &TlsStuff) -> (Ssl, bool) {
+        let mut ssl = Ssl::new(&tls.acc.context()).unwrap();
+        let ssl_ref = &mut ssl;
+        if !tls.cookies_enabled {
+            trace!("Cookies disabled, won't verify first packet");
+            return (ssl, true);
         }
-        let stream = Box::new(ssl_stream);
 
-        // let stream = Box::new(wrapper);
-
-
-        entry.insert(Client {
-            // ssl_stream,
-            stream,
-            addr: src,
-            con_id,
-        });
-
-        Ok(())
+        trace!("Verifying first packet");
+        let is_verified = unsafe {
+            let bio: *mut openssl_sys::bio_st =
+                openssl_sys::BIO_new_dgram(self.listener.as_raw_fd(), 0);
+            openssl_sys::SSL_set_bio(ssl_ref.as_ptr(), bio, bio);
+            let bio_addr = openssl_sys::BIO_ADDR_new();
+            use foreign_types_shared::ForeignTypeRef;
+            let res = openssl_sys::DTLSv1_listen(ssl_ref.as_ptr(), bio_addr);
+            trace!("Verify result: {res}");
+            res > 0
+        };
+        (ssl, is_verified)
     }
 
     fn handle_packet_on_existing_connection(&mut self, token: Token) {
@@ -306,10 +347,8 @@ impl ServerDtlsSocket {
         let poll = Poll::new()?;
         let events = Events::with_capacity(128);
 
-        let cookie_config = opts.tls.cookie.load();
-        let acc =
-            TlsStuff::build_acceptor(&opts.tls.cert_path, &opts.tls.key_path, &cookie_config)?;
-        let cookie_generation = opts.tls.cookie.generation();
+        let tls_config = opts.tls.handle.load();
+        let acc = TlsStuff::build_acceptor(&tls_config)?;
 
         let l_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         l_sock.set_reuse_address(true)?;
@@ -324,13 +363,7 @@ impl ServerDtlsSocket {
 
         let res = ServerDtlsSocket {
             mio_stuff: MioStuff { poll, events },
-            tls_stuff: TlsStuff {
-                acc,
-                cert_path: opts.tls.cert_path,
-                key_path: opts.tls.key_path,
-                cookie_handle: opts.tls.cookie,
-                cookie_generation,
-            },
+            tls_stuff: TlsStuff::new(acc, opts.tls.handle),
             state: State {
                 connections,
                 listener,
@@ -350,14 +383,8 @@ pub struct Client {
     con_id: usize,
 }
 
-trait ReadWrite: Read + Write{
-
-}
-impl<S: Read + Write> ReadWrite for S {
-
-}
-
-
+trait ReadWrite: Read + Write {}
+impl<S: Read + Write> ReadWrite for S {}
 
 #[derive(Debug)]
 pub struct MioUdpWrapper(pub UdpSocket);

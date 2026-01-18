@@ -1,6 +1,6 @@
 use enet_dtls::{
     PacketSocket, PacketSocketWrapper, ServerSocketOptions,
-    tls::{CookieConfig, ServerTlsOptions, TlsConfig, TlsConfigHandle},
+    tls::{CertConfig, CookieConfig, ServerTlsOptions, TlsConfig, TlsConfigHandle},
 };
 use log::{info, warn};
 
@@ -10,11 +10,22 @@ fn main() {
         .init();
 
     let mut p = PacketSocketWrapper::new();
+
+    let cch = TlsConfigHandle::new(TlsConfig {
+        cookies: Some(CookieConfig { secret: 42 }),
+        // cookies: None,
+        connect_token: None,
+        cert: Some(CertConfig {
+            cert_path: "test_data/server_cert.pem".into(),
+            key_path: "test_data/server_key.pem".into(),
+        }),
+    });
+
+    let tls = ServerTlsOptions::new(&cch);
+
     let opts = ServerSocketOptions {
         addr: "127.0.0.1:9001".parse().unwrap(),
-        tls: ServerTlsOptions {
-            handle: TlsConfigHandle::new(TlsConfig::default()),
-        },
+        tls,
     };
     p.bind(opts).unwrap();
     let mut buf = vec![0; 1024];

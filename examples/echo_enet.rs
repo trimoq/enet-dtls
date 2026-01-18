@@ -9,7 +9,7 @@ use std::{
 
 use enet::{Address, BandwidthLimit, ChannelLimit, Enet, Event, Packet, PacketMode};
 use enet_dtls::ffi::local::set_server_tls_options;
-use enet_dtls::tls::{CookieConfig, CookieConfigHandle, ServerTlsOptions};
+use enet_dtls::tls::{CertConfig, CookieConfig, ServerTlsOptions, TlsConfig, TlsConfigHandle};
 use log::{info, warn};
 
 fn main() {
@@ -27,13 +27,16 @@ fn main() {
 
     let local_addr = Address::new(Ipv4Addr::LOCALHOST, 9001);
 
-    let cch = CookieConfigHandle::new(CookieConfig::default());
+    let cch = TlsConfigHandle::new(TlsConfig {
+        cookies: None,
+        connect_token: None,
+        cert: Some(CertConfig {
+            cert_path: "test_data/server_cert.pem".into(),
+            key_path: "test_data/server_key.pem".into(),
+        }),
+    });
 
-    let opt = ServerTlsOptions {
-        cert_path: "test_data/server_cert.pem".into(),
-        key_path: "test_data/server_key.pem".into(),
-        cookie: cch.clone(),
-    };
+    let opt = ServerTlsOptions::new(&cch);
 
     set_server_tls_options(opt);
 
@@ -87,7 +90,9 @@ fn main() {
         i += 1;
 
         if i % 10_000 == 0 {
-            cch.update(CookieConfig::default());
+            // placeholder, does not change anything
+            let cfg = (**cch.load()).clone();
+            cch.update(cfg);
         }
     }
 }

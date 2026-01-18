@@ -19,6 +19,12 @@ use crate::{Packet, PacketSocket, ReceiveResult, ServerSocketOptions};
 
 const LISTENER: Token = Token(0);
 
+/// Maximum number of new connections to accept per poll iteration
+const MAX_ACCEPTS_PER_POLL: usize = 16;
+
+/// Maximum number of packets to read per connection per poll iteration
+const MAX_PACKETS_PER_CONNECTION: usize = 64;
+
 pub struct ServerDtlsSocket {
     mio_stuff: MioStuff,
     tls_stuff: TlsStuff,
@@ -118,7 +124,13 @@ impl State {
         tls: &TlsStuff,
         registry: &Registry,
     ) -> io::Result<()> {
+        let mut accepted = 0usize;
         loop {
+            if accepted >= MAX_ACCEPTS_PER_POLL {
+                trace!("Reached max accepts per poll ({})", MAX_ACCEPTS_PER_POLL);
+                break;
+            }
+
             let mut recv_buf = [0u8; 1500];
             let (len, src) = match self.listener.peek_from(&mut recv_buf) {
                 Ok(v) => v,
@@ -165,6 +177,7 @@ impl State {
                     addr: src,
                     con_id,
                 });
+                accepted += 1;
             } else {
 
                 trace!("New accept (plaintext): {:?}", &recv_buf[..len]);
@@ -184,6 +197,7 @@ impl State {
                     buf: bytes::Bytes::copy_from_slice(&first_packet),
                     addr: src,
                 });
+                accepted += 1;
             }
         }
 
@@ -242,8 +256,17 @@ impl State {
             trace!("Handling client [{}]", client.con_id);
             let client_addr = client.addr;
 
-            // Read until WouldBlock to drain the socket
+            // Read until WouldBlock or limit reached
+            let mut packets_read = 0usize;
             loop {
+                if packets_read >= MAX_PACKETS_PER_CONNECTION {
+                    trace!(
+                        "Reached max packets per connection ({})",
+                        MAX_PACKETS_PER_CONNECTION
+                    );
+                    break;
+                }
+
                 if self.buffer.remaining_mut() < 1024 {
                     self.buffer.reserve(4096);
                 }
@@ -261,6 +284,7 @@ impl State {
                         e => e,
                     }
                 };
+                packets_read += 1;
 
                 match outcome {
                     Ok(len) => {

@@ -103,11 +103,18 @@ pub extern "C" fn enet_socket_create(tpe: ENetSocketType) -> ENetSocket {
 }
 
 thread_local! {
-    pub static BAR: RefCell<ServerTlsOptions> = RefCell::new(ServerTlsOptions::default());
+    static BIND_TLS_OPT: RefCell<ServerTlsOptions> = RefCell::new(ServerTlsOptions::default());
+    static CONNECT_TLS_OPT: RefCell<ClientTlsOptions> = RefCell::new(ClientTlsOptions::default());
 }
 
 pub fn set_server_tls_options(opt: ServerTlsOptions) {
-    BAR.set(opt);
+    BIND_TLS_OPT.set(opt);
+}
+pub fn set_client_tls_options(opt: ClientTlsOptions) {
+    CONNECT_TLS_OPT.set(opt);
+}
+pub fn take_client_tls_options() -> ClientTlsOptions {
+    CONNECT_TLS_OPT.take()
 }
 
 #[unsafe(no_mangle)]
@@ -119,7 +126,7 @@ pub extern "C" fn enet_socket_bind(
     let addr = unsafe { &*(addr as *const ENetAddress) };
 
     let addr = from_enet_addr(addr);
-    let tsl_opt = BAR.take();
+    let tsl_opt = BIND_TLS_OPT.take();
     let opts = ServerSocketOptions { addr, tls: tsl_opt };
     match sock.bind(opts) {
         Ok(_) => {
@@ -228,10 +235,9 @@ pub extern "C" fn enet_socket_connect(
     let addr = unsafe { &*(addr as *const ENetAddress) };
     let addr = from_enet_addr(addr);
     warn!("enet_socket_connect{}", addr);
-    let tls = ClientTlsOptions {
-        ca_cert_path: "test_data/server_cert.pem".into(),
-        domain: "localhost".into(),
-    };
+
+    let tls = CONNECT_TLS_OPT.take();
+
     match sock.connect(addr, tls) {
         Ok(_) => 0,
         Err(_) => -1,

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+use crate::ffi;
 use crate::socket::client::ClientDtlsSocket;
 use crate::socket::fresh::FreshSocket;
 use crate::socket::server::ServerDtlsSocket;
@@ -85,6 +86,16 @@ impl Default for ServerTlsOptions {
 pub struct ClientTlsOptions {
     pub ca_cert_path: PathBuf,
     pub domain: String,
+    pub verify: bool
+}
+impl Default for ClientTlsOptions{
+    fn default() -> Self {
+        Self { 
+            ca_cert_path: Default::default(),
+            domain: Default::default(), 
+            verify: Default::default() 
+        }
+    }
 }
 
 pub struct ServerSocketOptions {
@@ -140,10 +151,7 @@ impl PacketSocket for EnetPacketSocket {
     fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
         // special handling for connect, as enet does not bother to conenct before send
         if self.wrapper.is_fresh() {
-            let tls = ClientTlsOptions {
-                ca_cert_path: "test_data/server_cert.pem".into(),
-                domain: "localhost".into(),
-            };
+            let tls = ffi::take_client_tls_options();
             self.connect(addr, tls).unwrap();
         }
         let res = self.wrapper.send(addr, bytes);

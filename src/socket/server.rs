@@ -90,7 +90,6 @@ struct State {
     listener: UdpSocket,
     buffer: BytesMut,
     receive_queue: VecDeque<Packet>,
-    send_queue: VecDeque<Packet>,
 }
 
 impl State {
@@ -173,7 +172,6 @@ impl State {
             ssl_stream,
             addr: src,
             con_id,
-            send_buffer: VecDeque::new(),
         });
 
         Ok(())
@@ -339,7 +337,6 @@ impl ServerDtlsSocket {
                 addr: opts.addr,
                 buffer: BytesMut::with_capacity(1024 * 1024),
                 receive_queue: VecDeque::new(),
-                send_queue: VecDeque::new(),
             },
         };
         Ok(res)
@@ -350,7 +347,6 @@ pub struct Client {
     pub(crate) addr: SocketAddr,
     ssl_stream: SslStream<MioUdpWrapper>,
     con_id: usize,
-    send_buffer: VecDeque<Packet>,
 }
 
 #[derive(Debug)]

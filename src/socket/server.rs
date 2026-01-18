@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use crate::protocol::EnetDissector;
 use crate::socket::connections::Connections;
-use crate::socket::{CookieConfig, CookieConfigHandle, ServerSocketOptions};
-use crate::{Packet, PacketSocket, ReceiveResult};
+use crate::tls::{CookieConfig, CookieConfigHandle};
+use crate::{Packet, PacketSocket, ReceiveResult, ServerSocketOptions};
 
 const LISTENER: Token = Token(0);
 
@@ -188,6 +188,7 @@ impl State {
         let mut should_remove = false;
 
         if let Some(client) = self.connections.get_mut(client_idx) {
+            trace!("Handling client [{}]", client.con_id);
             let slice = self.buffer.chunk_mut();
 
             // safety: the uninitalized memory is passed to openssl and we must only read from it

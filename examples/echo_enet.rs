@@ -8,8 +8,8 @@ use std::{
 };
 
 use enet::{Address, BandwidthLimit, ChannelLimit, Enet, Event, Packet, PacketMode};
-use enet_dtls::ffi::set_server_tls_options;
-use enet_dtls::{CookieConfig, CookieConfigHandle, PacketSocketWrapper, ServerTlsOptions};
+use enet_dtls::ffi::local::set_server_tls_options;
+use enet_dtls::tls::{CookieConfig, CookieConfigHandle, ServerTlsOptions};
 use log::{info, warn};
 
 fn main() {

@@ -1,6 +1,6 @@
 use enet_dtls::{
-    CookieConfig, CookieConfigHandle, PacketSocket, PacketSocketWrapper, ServerSocketOptions,
-    ServerTlsOptions,
+    PacketSocket, PacketSocketWrapper, ServerSocketOptions,
+    tls::{CookieConfig, CookieConfigHandle, ServerTlsOptions},
 };
 
 fn main() {

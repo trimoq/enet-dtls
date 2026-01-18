@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use enet::*;
-use enet_dtls::{ClientTlsOptions, ffi};
+use enet_dtls::ffi;
+use enet_dtls::ffi::local::set_client_tls_options;
+use enet_dtls::tls::ClientTlsOptions;
 use log::{error, info, warn};
 
 fn main() -> anyhow::Result<()> {
@@ -32,10 +34,10 @@ fn main() -> anyhow::Result<()> {
     let tls = ClientTlsOptions {
         ca_cert_path: "test_data/server_cert.pem".into(),
         domain: "localhost".into(),
-        verify: true
+        verify: true,
     };
 
-    ffi::set_client_tls_options(tls);
+    set_client_tls_options(tls);
 
     host.connect(&Address::new(Ipv4Addr::LOCALHOST, 9001), 1, 0)
         .context("connect failed")?;

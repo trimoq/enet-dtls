@@ -3,8 +3,8 @@ use bytes::Bytes;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 use crate::socket::client::ClientDtlsSocket;
@@ -72,12 +72,13 @@ pub struct ServerTlsOptions {
     pub key_path: PathBuf,
     pub cookie: CookieConfigHandle,
 }
-impl Default for ServerTlsOptions{
+impl Default for ServerTlsOptions {
     fn default() -> Self {
-        Self { 
-            cert_path: Default::default(), 
-            key_path: Default::default(), 
-            cookie: CookieConfigHandle::new(CookieConfig::default()) }
+        Self {
+            cert_path: Default::default(),
+            key_path: Default::default(),
+            cookie: CookieConfigHandle::new(CookieConfig::default()),
+        }
     }
 }
 
@@ -138,11 +139,11 @@ impl PacketSocket for EnetPacketSocket {
 
     fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()> {
         // special handling for connect, as enet does not bother to conenct before send
-        if self.wrapper.is_fresh(){
-            let tls = ClientTlsOptions {         
+        if self.wrapper.is_fresh() {
+            let tls = ClientTlsOptions {
                 ca_cert_path: "test_data/server_cert.pem".into(),
                 domain: "localhost".into(),
-             };
+            };
             self.connect(addr, tls).unwrap();
         }
         let res = self.wrapper.send(addr, bytes);
@@ -174,7 +175,11 @@ impl EnetPacketSocket {
         res
     }
 
-    pub fn connect(&mut self, addr: SocketAddr, tls: ClientTlsOptions) -> Result<(), PacketSocketError> {
+    pub fn connect(
+        &mut self,
+        addr: SocketAddr,
+        tls: ClientTlsOptions,
+    ) -> Result<(), PacketSocketError> {
         let res = self.wrapper.connect(addr, tls);
         let _ = self.wrapper.poll();
         res
@@ -223,7 +228,11 @@ impl PacketSocketWrapper {
         }
     }
 
-    pub fn connect(&mut self, addr: SocketAddr, tls: ClientTlsOptions) -> Result<(), PacketSocketError> {
+    pub fn connect(
+        &mut self,
+        addr: SocketAddr,
+        tls: ClientTlsOptions,
+    ) -> Result<(), PacketSocketError> {
         if self.inner.is_fresh() {
             self.inner = self.do_connect(addr, tls)?;
             Ok(())
@@ -232,7 +241,10 @@ impl PacketSocketWrapper {
         }
     }
 
-    fn do_bind(&self, opts: ServerSocketOptions) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
+    fn do_bind(
+        &self,
+        opts: ServerSocketOptions,
+    ) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
         let sock = ServerDtlsSocket::bind(opts).map_err(|_e| PacketSocketError::TODO)?;
         Ok(Box::new(sock))
     }

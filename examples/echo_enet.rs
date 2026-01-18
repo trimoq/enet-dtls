@@ -37,7 +37,6 @@ fn main() {
 
     set_server_tls_options(opt);
 
-
     let mut host = enet
         .create_host::<()>(
             Some(&local_addr),
@@ -90,6 +89,5 @@ fn main() {
         if i % 10_000 == 0 {
             cch.update(CookieConfig::default());
         }
-
     }
 }

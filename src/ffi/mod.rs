@@ -9,8 +9,8 @@ use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::socket::{
-    ClientTlsOptions, CookieConfig, CookieConfigHandle, EnetPacketSocket as EnetPacketSocketWrapper,
-    PacketSocket, ServerSocketOptions, ServerTlsOptions,
+    ClientTlsOptions, EnetPacketSocket as EnetPacketSocketWrapper, PacketSocket,
+    ServerSocketOptions, ServerTlsOptions,
 };
 
 pub type EnetPacketSocket = EnetPacketSocketWrapper;
@@ -106,7 +106,7 @@ thread_local! {
     pub static BAR: RefCell<ServerTlsOptions> = RefCell::new(ServerTlsOptions::default());
 }
 
-pub fn set_server_tls_options(opt: ServerTlsOptions){
+pub fn set_server_tls_options(opt: ServerTlsOptions) {
     BAR.set(opt);
 }
 
@@ -120,10 +120,7 @@ pub extern "C" fn enet_socket_bind(
 
     let addr = from_enet_addr(addr);
     let tsl_opt = BAR.take();
-    let opts = ServerSocketOptions {
-        addr,
-        tls: tsl_opt
-    };
+    let opts = ServerSocketOptions { addr, tls: tsl_opt };
     match sock.bind(opts) {
         Ok(_) => {
             debug!("Socket bound");

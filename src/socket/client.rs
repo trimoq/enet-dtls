@@ -11,8 +11,8 @@ use std::net::SocketAddr;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 
-use crate::socket::server::MioUdpWrapper;
 use crate::socket::ClientTlsOptions;
+use crate::socket::server::MioUdpWrapper;
 use crate::{Packet, PacketSocket, ReceiveResult};
 
 const SOCKET: Token = Token(0);
@@ -44,14 +44,18 @@ impl ClientDtlsSocket {
         sock.set_nonblocking(true)?;
         sock.connect(&addr.into())?;
 
-        let local_addr = sock.local_addr()?.as_socket().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "failed to get local address")
-        })?;
+        let local_addr = sock
+            .local_addr()?
+            .as_socket()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to get local address"))?;
 
         let mut mio_udp = UdpSocket::from_std(sock.into());
 
-        poll.registry()
-            .register(&mut mio_udp, SOCKET, Interest::READABLE.add(Interest::WRITABLE))?;
+        poll.registry().register(
+            &mut mio_udp,
+            SOCKET,
+            Interest::READABLE.add(Interest::WRITABLE),
+        )?;
 
         let wrapper = MioUdpWrapper(mio_udp);
         let ssl = connector.configure()?.into_ssl(&tls.domain)?;
@@ -151,7 +155,10 @@ impl PacketSocket for ClientDtlsSocket {
         self.poll
             .poll(&mut self.events, Some(Duration::from_micros(1)))?;
 
-        let should_receive = self.events.iter().any(|e| e.token() == SOCKET && e.is_readable());
+        let should_receive = self
+            .events
+            .iter()
+            .any(|e| e.token() == SOCKET && e.is_readable());
 
         if should_receive {
             self.do_receive();

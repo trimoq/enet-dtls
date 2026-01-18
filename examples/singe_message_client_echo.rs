@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     // Wait for connection
     let mut retries = 10;
     loop {
-        retries-=1;
+        retries -= 1;
         match host.service(100).context("service failed")? {
             Some(Event::Connect(_)) => {
                 info!("[client] connected");
@@ -46,9 +46,9 @@ fn main() -> anyhow::Result<()> {
             Some(Event::Receive { .. }) => {
                 anyhow::bail!("unexpected Receive-event while waiting for connection")
             }
-            None => {},
+            None => {}
         }
-        if retries<=0{
+        if retries <= 0 {
             panic!("Not able to connect");
         }
     }
@@ -59,7 +59,7 @@ fn main() -> anyhow::Result<()> {
     data[0] = 0x01;
     data[1..5].copy_from_slice(&seq.to_le_bytes());
 
-    let mut peer =  host.peers().next().context("no connected peer?")?;
+    let mut peer = host.peers().next().context("no connected peer?")?;
 
     peer.send_packet(
         Packet::new(&data, PacketMode::ReliableSequenced).unwrap(),
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
     let mut retries = 10;
 
     loop {
-        retries-=1;
+        retries -= 1;
         match host.service(100).context("service failed") {
             Ok(Some(e)) => match &e {
                 Event::Connect(_) => info!("[client] connect event"),
@@ -96,15 +96,14 @@ fn main() -> anyhow::Result<()> {
             Ok(None) => {}
             Err(e) => error!("[client] service error: {}", e),
         }
-        if retries<=0{
+        if retries <= 0 {
             panic!("No message within a few retries");
         }
     }
 
     if verified {
         info!("Sent message verified, all good");
-    }
-    else {
+    } else {
         panic!("Sent message not verified");
     }
 

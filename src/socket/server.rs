@@ -309,7 +309,8 @@ impl ServerDtlsSocket {
         let events = Events::with_capacity(128);
 
         let cookie_config = opts.tls.cookie.load();
-        let acc = TlsStuff::build_acceptor(&opts.tls.cert_path, &opts.tls.key_path, &cookie_config)?;
+        let acc =
+            TlsStuff::build_acceptor(&opts.tls.cert_path, &opts.tls.key_path, &cookie_config)?;
         let cookie_generation = opts.tls.cookie.generation();
 
         let l_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -370,4 +371,3 @@ impl Write for MioUdpWrapper {
         Ok(())
     }
 }
-

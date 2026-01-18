@@ -1,4 +1,4 @@
-use enet_dtls::{PacketSocket, PacketSocketWrapper};
+use enet_dtls::{PacketSocket, PacketSocketWrapper, ServerSocketOptions, ServerTlsOptions};
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -6,7 +6,14 @@ fn main() {
         .init();
 
     let mut p = PacketSocketWrapper::new();
-    p.bind("127.0.0.1:9001".parse().unwrap()).unwrap();
+    let opts = ServerSocketOptions {
+        addr: "127.0.0.1:9001".parse().unwrap(),
+        tls: ServerTlsOptions {
+            cert_path: "test_data/server_cert.pem".into(),
+            key_path: "test_data/server_key.pem".into(),
+        },
+    };
+    p.bind(opts).unwrap();
     loop {
         p.poll().unwrap();
     }

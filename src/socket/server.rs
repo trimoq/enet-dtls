@@ -11,8 +11,9 @@ use std::os::fd::AsRawFd;
 use std::slice::from_raw_parts_mut;
 use std::time::Duration;
 
-use crate::protocol::{EnetDissector, EnetPacket};
+use crate::protocol::EnetDissector;
 use crate::socket::connections::Connections;
+use crate::socket::ServerSocketOptions;
 use crate::{Packet, PacketSocket, ReceiveResult};
 
 const LISTENER: Token = Token(0);
@@ -250,15 +251,13 @@ impl PacketSocket for ServerDtlsSocket {
 }
 
 impl ServerDtlsSocket {
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
-        // todo: allow shared poll pool to be used, passed in from the outside
+    pub fn bind(opts: ServerSocketOptions) -> io::Result<Self> {
         let poll = Poll::new()?;
         let events = Events::with_capacity(128);
 
         let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::dtls_server())?;
-        builder
-            .set_private_key_file(&"test_data/server_key.pem", openssl::ssl::SslFiletype::PEM)?;
-        builder.set_certificate_chain_file(&"test_data/server_cert.pem")?;
+        builder.set_private_key_file(&opts.tls.key_path, openssl::ssl::SslFiletype::PEM)?;
+        builder.set_certificate_chain_file(&opts.tls.cert_path)?;
 
         builder.set_options(openssl::ssl::SslOptions::COOKIE_EXCHANGE);
         builder.set_cookie_generate_cb(generate_cookie);
@@ -269,7 +268,7 @@ impl ServerDtlsSocket {
         let l_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         l_sock.set_reuse_address(true)?;
         l_sock.set_nonblocking(true)?;
-        l_sock.bind(&addr.into())?;
+        l_sock.bind(&opts.addr.into())?;
         let mut listener = UdpSocket::from_std(l_sock.into());
 
         poll.registry()
@@ -283,7 +282,7 @@ impl ServerDtlsSocket {
             state: State {
                 connections,
                 listener,
-                addr,
+                addr: opts.addr,
                 buffer: BytesMut::with_capacity(1024 * 1024),
                 receive_queue: VecDeque::new(),
                 send_queue: VecDeque::new(),

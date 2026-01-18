@@ -7,7 +7,10 @@ use std::os::raw::c_void;
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::socket::{EnetPacketSocket as EnetPacketSocketWrapper, PacketSocket};
+use crate::socket::{
+    ClientTlsOptions, EnetPacketSocket as EnetPacketSocketWrapper, PacketSocket,
+    ServerSocketOptions, ServerTlsOptions,
+};
 
 pub type EnetPacketSocket = EnetPacketSocketWrapper;
 
@@ -107,7 +110,14 @@ pub extern "C" fn enet_socket_bind(
     let addr = unsafe { &*(addr as *const ENetAddress) };
 
     let addr = from_enet_addr(addr);
-    match sock.bind(addr) {
+    let opts = ServerSocketOptions {
+        addr,
+        tls: ServerTlsOptions {
+            cert_path: "test_data/server_cert.pem".into(),
+            key_path: "test_data/server_key.pem".into(),
+        },
+    };
+    match sock.bind(opts) {
         Ok(_) => {
             debug!("Socket bound");
             0
@@ -214,7 +224,11 @@ pub extern "C" fn enet_socket_connect(
     let addr = unsafe { &*(addr as *const ENetAddress) };
     let addr = from_enet_addr(addr);
     warn!("enet_socket_connect{}", addr);
-    match sock.connect(addr) {
+    let tls = ClientTlsOptions {
+        ca_cert_path: "test_data/server_cert.pem".into(),
+        domain: "localhost".into(),
+    };
+    match sock.connect(addr, tls) {
         Ok(_) => 0,
         Err(_) => -1,
     }

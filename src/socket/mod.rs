@@ -1,10 +1,9 @@
 use bytes::Bytes;
-use core::ffi;
-use std::io::{self};
+use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use thiserror::Error;
 
-use crate::ffi::to_enet_addr;
 use crate::socket::client::ClientDtlsSocket;
 use crate::socket::fresh::FreshSocket;
 use crate::socket::server::ServerDtlsSocket;
@@ -13,6 +12,21 @@ mod client;
 mod connections;
 mod fresh;
 mod server;
+
+pub struct ServerTlsOptions {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
+pub struct ClientTlsOptions {
+    pub ca_cert_path: PathBuf,
+    pub domain: String,
+}
+
+pub struct ServerSocketOptions {
+    pub addr: SocketAddr,
+    pub tls: ServerTlsOptions,
+}
 
 pub trait PacketSocket {
     fn get_addr(&self) -> io::Result<SocketAddr>;
@@ -83,14 +97,14 @@ impl EnetPacketSocket {
         }
     }
 
-    pub fn bind(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
-        let res = self.wrapper.bind(addr);
+    pub fn bind(&mut self, opts: ServerSocketOptions) -> Result<(), PacketSocketError> {
+        let res = self.wrapper.bind(opts);
         let _ = self.wrapper.poll();
         res
     }
 
-    pub fn connect(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
-        let res = self.wrapper.connect(addr);
+    pub fn connect(&mut self, addr: SocketAddr, tls: ClientTlsOptions) -> Result<(), PacketSocketError> {
+        let res = self.wrapper.connect(addr, tls);
         let _ = self.wrapper.poll();
         res
     }
@@ -126,30 +140,34 @@ impl PacketSocketWrapper {
         }
     }
 
-    pub fn bind(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
+    pub fn bind(&mut self, opts: ServerSocketOptions) -> Result<(), PacketSocketError> {
         if self.inner.is_fresh() {
-            self.inner = self.do_bind(addr)?;
+            self.inner = self.do_bind(opts)?;
             Ok(())
         } else {
             Err(PacketSocketError::SocketNotFresh)
         }
     }
 
-    pub fn connect(&mut self, addr: SocketAddr) -> Result<(), PacketSocketError> {
+    pub fn connect(&mut self, addr: SocketAddr, tls: ClientTlsOptions) -> Result<(), PacketSocketError> {
         if self.inner.is_fresh() {
-            self.inner = self.do_connect(addr)?;
+            self.inner = self.do_connect(addr, tls)?;
             Ok(())
         } else {
             Err(PacketSocketError::SocketNotFresh)
         }
     }
 
-    fn do_bind(&self, addr: SocketAddr) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
-        let sock = ServerDtlsSocket::bind(addr).map_err(|_e| PacketSocketError::TODO)?;
+    fn do_bind(&self, opts: ServerSocketOptions) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
+        let sock = ServerDtlsSocket::bind(opts).map_err(|_e| PacketSocketError::TODO)?;
         Ok(Box::new(sock))
     }
-    fn do_connect(&self, addr: SocketAddr) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
-        let sock = ClientDtlsSocket::connect(addr).map_err(|_e| PacketSocketError::TODO)?;
+    fn do_connect(
+        &self,
+        addr: SocketAddr,
+        tls: ClientTlsOptions,
+    ) -> Result<Box<dyn PacketSocket>, PacketSocketError> {
+        let sock = ClientDtlsSocket::connect(addr, tls).map_err(|_e| PacketSocketError::TODO)?;
         Ok(Box::new(sock))
     }
 }

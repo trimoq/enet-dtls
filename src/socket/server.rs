@@ -165,12 +165,21 @@ impl State {
         } else {
             trace!("TLS is DISABLED");
             trace!("Verified client, begin client setup");
+
+            // Consume the packet from the listener (peek_from only peeked it, openssl would read it for handshake init)
+            let mut first_packet = vec![0u8; len];
+            let _ = self.listener.recv_from(&mut first_packet)?;
+
             let (entry, con_id, wrapper) = self.hannes(registry, src)?;
             entry.insert(Client {
-                // ssl_stream,
                 stream: Box::new(wrapper),
                 addr: src,
                 con_id,
+            });
+
+            self.receive_queue.push_back(Packet {
+                buf: bytes::Bytes::copy_from_slice(&first_packet),
+                addr: src,
             });
         }
 

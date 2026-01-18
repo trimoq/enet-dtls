@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+const POLL_TIMEOUT: Option<Duration> = Some(Duration::from_millis(10));
+
 fn spawn_echo_server(
     addr: SocketAddr,
     tls_config: TlsConfig,
@@ -30,7 +32,7 @@ fn spawn_echo_server(
         let mut buf = vec![0u8; 1500];
 
         while running.load(Ordering::Relaxed) {
-            if server.poll().is_err() {
+            if server.poll(POLL_TIMEOUT).is_err() {
                 continue;
             }
             match server.receive(&mut buf) {

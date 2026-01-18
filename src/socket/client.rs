@@ -163,9 +163,8 @@ impl PacketSocket for ClientDtlsSocket {
         }
     }
 
-    fn poll(&mut self) -> io::Result<()> {
-        self.poll
-            .poll(&mut self.events, Some(Duration::from_millis(10)))?;
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.poll.poll(&mut self.events, timeout)?;
 
         let should_receive = self
             .events

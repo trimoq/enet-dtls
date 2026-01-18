@@ -128,17 +128,9 @@ impl State {
                 }
                 Err(_) => break,
             };
-
             if tls.tls_enabled {
-                // TLS path: handle one connection at a time due to DTLS handshake complexity
-                let mut recv_buf = [0u8; 1500];
-                let (len, src) = match self.listener.peek_from(&mut recv_buf) {
-                    Ok(v) => v,
-                    Err(_) => return Ok(()),
-                };
                 trace!("New accept (TLS): {:?}", &recv_buf[..len]);
 
-                trace!("TLS is enabled");
                 let (ssl, is_verified) = self.fun_name(tls);
                 if !is_verified {
                     trace!("Unverified packet, dropping");
@@ -174,9 +166,8 @@ impl State {
                     con_id,
                 });
             } else {
-                trace!("New accept (plaintext): {:?}", &recv_buf[..len]);
 
-                trace!("TLS is DISABLED");
+                trace!("New accept (plaintext): {:?}", &recv_buf[..len]);
 
                 // Consume the packet from the listener (peek_from only peeked it)
                 let mut first_packet = vec![0u8; len];
@@ -338,7 +329,7 @@ impl PacketSocket for ServerDtlsSocket {
         }
     }
 
-    fn poll(&mut self) -> io::Result<()> {
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let ServerDtlsSocket {
             mio_stuff,
             tls_stuff,
@@ -347,9 +338,7 @@ impl PacketSocket for ServerDtlsSocket {
 
         tls_stuff.check_and_rebuild()?;
 
-        mio_stuff
-            .poll
-            .poll(&mut mio_stuff.events, Some(Duration::from_millis(10)))?;
+        mio_stuff.poll.poll(&mut mio_stuff.events, timeout)?;
 
         for event in mio_stuff.events.iter() {
             match event.token() {

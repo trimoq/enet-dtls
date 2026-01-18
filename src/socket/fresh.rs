@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
 
 use crate::{PacketSocket, ReceiveResult};
 
@@ -30,7 +30,7 @@ impl PacketSocket for FreshSocket {
         ))
     }
 
-    fn poll(&mut self) -> io::Result<()> {
+    fn poll(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
         unimplemented!("Can't poll on a fresh socket")
     }
 }

@@ -250,12 +250,11 @@ pub extern "C" fn enet_socket_get_option(
 pub extern "C" fn enet_socket_wait(
     sock: ENetSocket,
     _: *mut enet_uint32,
-    _: enet_uint32,
+    timeout_ms: enet_uint32,
 ) -> ::std::os::raw::c_int {
-    // todo poll instead of busy looping
-    // warn!("enet_socket_wait");
     let sock = unsafe { &mut *(sock as *mut EnetPacketSocketWrapper) };
-    match sock.poll() {
+    let timeout = Some(std::time::Duration::from_millis(timeout_ms as u64));
+    match sock.poll(timeout) {
         Ok(_) => 0,
         Err(_) => -1,
     }

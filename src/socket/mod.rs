@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::ffi::local::take_client_tls_options;
@@ -24,8 +25,7 @@ pub trait PacketSocket {
     fn get_addr(&self) -> io::Result<SocketAddr>;
     fn send(&mut self, addr: SocketAddr, bytes: &[u8]) -> io::Result<()>;
     fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult>;
-    //todo add timeout
-    fn poll(&mut self) -> io::Result<()>;
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()>;
     fn is_fresh(&self) -> bool {
         false
     }
@@ -72,18 +72,17 @@ impl PacketSocket for EnetPacketSocket {
             self.connect(addr, tls).unwrap();
         }
         let res = self.wrapper.send(addr, bytes);
-        let _ = self.wrapper.poll();
+        let _ = self.wrapper.poll(Some(Duration::ZERO));
         res
     }
 
     fn receive(&mut self, buffer: &mut [u8]) -> io::Result<ReceiveResult> {
-        let _ = self.wrapper.poll();
+        let _ = self.wrapper.poll(Some(Duration::ZERO));
         self.wrapper.receive(buffer)
     }
 
-    fn poll(&mut self) -> io::Result<()> {
-        // unimplemented!("Enet polls on send and receive respectively")
-        self.wrapper.poll()
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.wrapper.poll(timeout)
     }
 }
 impl EnetPacketSocket {
@@ -96,7 +95,7 @@ impl EnetPacketSocket {
 
     pub fn bind(&mut self, opts: ServerSocketOptions) -> Result<(), PacketSocketError> {
         let res = self.wrapper.bind(opts);
-        let _ = self.wrapper.poll();
+        let _ = self.wrapper.poll(Some(Duration::ZERO));
         res
     }
 
@@ -106,7 +105,7 @@ impl EnetPacketSocket {
         tls: ClientTlsOptions,
     ) -> Result<(), PacketSocketError> {
         let res = self.wrapper.connect(addr, tls);
-        let _ = self.wrapper.poll();
+        let _ = self.wrapper.poll(Some(Duration::ZERO));
         res
     }
 }
@@ -128,8 +127,8 @@ impl PacketSocket for PacketSocketWrapper {
         self.inner.receive(buffer)
     }
 
-    fn poll(&mut self) -> io::Result<()> {
-        self.inner.poll()
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.inner.poll(timeout)
     }
     fn is_fresh(&self) -> bool {
         self.inner.is_fresh()

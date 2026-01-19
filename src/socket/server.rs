@@ -4,6 +4,7 @@ use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
 use openssl::ssl::{ErrorCode, Ssl, SslAcceptor, SslMethod, SslStream};
 use socket2::{Domain, Protocol, Socket, Type};
+use thiserror::Error;
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Result as IoResult, Write};
 use std::net::SocketAddr;
@@ -44,6 +45,13 @@ struct TlsStuff {
     config_generation: u64,
 }
 
+#[derive(Error, Debug)]
+enum TlsError{
+    #[error("Tls config is fucked up")]
+    TODO
+
+}
+
 fn secret_to_bytes(secret: u64) -> [u8; 8] {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&secret.to_le_bytes());
@@ -51,16 +59,19 @@ fn secret_to_bytes(secret: u64) -> [u8; 8] {
 }
 
 impl TlsStuff {
-    fn new(acc: SslAcceptor, config_handle: TlsConfigHandle) -> Self {
+    fn new(config_handle: TlsConfigHandle) -> Result<Self, TlsError> {
         let config_generation = config_handle.generation();
         let config = config_handle.load();
-        TlsStuff {
+        let acc = TlsStuff::build_acceptor(&config)
+            .map_err(|_|TlsError::TODO)?;
+        let res = TlsStuff {
             tls_enabled: config.is_tls_enabled(),
             cookies_enabled: config.are_cookies_enabled(),
             acc,
             config_handle,
             config_generation,
-        }
+        };
+        Ok(res)
     }
 
     fn build_acceptor(tls_config: &TlsConfig) -> io::Result<SslAcceptor> {
@@ -80,7 +91,7 @@ impl TlsStuff {
 
             let secret = secret_to_bytes(cookie_config.secret);
             builder.set_cookie_generate_cb(move |_ssl, cookie| {
-                trace!("Cookie generated");
+                trace!("Cookie generated: {:?}", secret);
                 cookie[..secret.len()].copy_from_slice(&secret);
                 Ok(secret.len())
             });
@@ -125,86 +136,94 @@ impl State {
         registry: &Registry,
     ) -> io::Result<()> {
         let mut accepted = 0usize;
+        let mut recv_buf = [0u8; 1500];
         loop {
             if accepted >= MAX_ACCEPTS_PER_POLL {
                 trace!("Reached max accepts per poll ({})", MAX_ACCEPTS_PER_POLL);
                 break;
             }
 
-            let mut recv_buf = [0u8; 1500];
             let (len, src) = match self.listener.peek_from(&mut recv_buf) {
                 Ok(v) => v,
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    trace!("No more pending connections");
+                    trace!("No more pending packets");
                     break;
                 }
                 Err(_) => break,
             };
+
+            // todo: connect token
+
             if tls.tls_enabled {
-                trace!("New accept (TLS): {:?}", &recv_buf[..len]);
-
-                let (ssl, is_verified) = self.fun_name(tls);
-                if !is_verified {
-                    trace!("Unverified packet, dropping");
-                    return Ok(());
-                }
-
-                trace!("Verified packet, begin client setup");
-
-                let (entry, con_id, wrapper) = self.hannes(registry, src)?;
-                let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
-                    warn!("SSL stream crreation failed");
-                    io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
-                })?;
-                match ssl_stream.accept() {
-                    Ok(_) => {
-                        trace!("Handshake accept ok")
-                    }
-                    Err(e) => {
-                        trace!("Hanshake accept err: {e}");
-                        match e.code() {
-                            ErrorCode::WANT_READ => trace!("Read would have blocked"),
-                            ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
-                            _ => {
-                                warn!("Other error occured");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                entry.insert(Client {
-                    stream: Box::new(ssl_stream),
-                    addr: src,
-                    con_id,
-                });
-                accepted += 1;
+                self.handle_new_packet_tls(tls, registry, recv_buf, len, src)?;
             } else {
 
-                trace!("New accept (plaintext): {:?}", &recv_buf[..len]);
-
-                // Consume the packet from the listener (peek_from only peeked it)
-                let mut first_packet = vec![0u8; len];
-                let _ = self.listener.recv_from(&mut first_packet)?;
-
-                let (entry, con_id, wrapper) = self.hannes(registry, src)?;
-                entry.insert(Client {
-                    stream: Box::new(wrapper),
-                    addr: src,
-                    con_id,
-                });
-
-                self.receive_queue.push_back(Packet {
-                    buf: bytes::Bytes::copy_from_slice(&first_packet),
-                    addr: src,
-                });
-                accepted += 1;
+                self.handle_new_packet_plaintext(registry, recv_buf, len, src)?;
             }
+            accepted += 1;
         }
 
         Ok(())
     }
 
-    fn hannes(
+    
+    fn handle_new_packet_tls(&mut self, tls: &TlsStuff, registry: &Registry, recv_buf: [u8; 1500], len: usize, src: SocketAddr) -> Result<(), io::Error> {
+        trace!("New packet (TLS): {:?}", &recv_buf[..len]);
+        let (ssl, dtls_verified) = self.verify_first_dtls_packet(tls);
+        if !dtls_verified {
+            trace!("Unverified packet, dropping");
+            return Ok(());
+        }
+        trace!("Verified packet, begin client setup");
+        let (entry, con_id, wrapper) = self.bind_client_socket(registry, src)?;
+        let mut ssl_stream = SslStream::new(ssl, wrapper).map_err(|_e| {
+            warn!("SSL stream crreation failed");
+            io::Error::new(io::ErrorKind::NotConnected, "Socket not connected")
+        })?;
+        match ssl_stream.accept() {
+            Ok(_) => {
+                trace!("Handshake accept ok")
+            }
+            Err(e) => {
+                trace!("Hanshake accept err: {e}");
+                match e.code() {
+                    ErrorCode::WANT_READ => trace!("Read would have blocked"),
+                    ErrorCode::WANT_WRITE => trace!("Write would have blocked"),
+                    _ => {
+                        warn!("Other error occured");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        entry.insert(Client {
+            stream: Box::new(ssl_stream),
+            addr: src,
+            con_id,
+        });
+        Ok(())
+    }
+
+
+    // This one is for debug purposes, so I couldn't be bothered to make it efficient
+    fn handle_new_packet_plaintext(&mut self, registry: &Registry, recv_buf: [u8; 1500], len: usize, src: SocketAddr) -> Result<(), io::Error> {
+        trace!("New packet (plaintext): {:?}", &recv_buf[..len]);
+        let mut first_packet = vec![0u8; len];
+        let _ = self.listener.recv_from(&mut first_packet)?;
+        let (entry, con_id, wrapper) = self.bind_client_socket(registry, src)?;
+        entry.insert(Client {
+            stream: Box::new(wrapper),
+            addr: src,
+            con_id,
+        });
+        self.receive_queue.push_back(Packet {
+            buf: bytes::Bytes::copy_from_slice(&first_packet),
+            addr: src,
+        });
+        Ok(())
+    }
+    
+    fn bind_client_socket(
         &mut self,
         registry: &Registry,
         src: SocketAddr,
@@ -224,7 +243,7 @@ impl State {
         Ok((entry, con_id, wrapper))
     }
 
-    fn fun_name(&mut self, tls: &TlsStuff) -> (Ssl, bool) {
+    fn verify_first_dtls_packet(&mut self, tls: &TlsStuff) -> (Ssl, bool) {
         let mut ssl = Ssl::new(&tls.acc.context()).unwrap();
         let ssl_ref = &mut ssl;
         if !tls.cookies_enabled {
@@ -388,8 +407,7 @@ impl ServerDtlsSocket {
         let poll = Poll::new()?;
         let events = Events::with_capacity(128);
 
-        let tls_config = opts.tls.handle.load();
-        let acc = TlsStuff::build_acceptor(&tls_config)?;
+
 
         let l_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         l_sock.set_reuse_address(true)?;
@@ -402,9 +420,11 @@ impl ServerDtlsSocket {
 
         let connections = Connections::new();
 
+        let tls_stuff = TlsStuff::new( opts.tls.handle).unwrap();
+
         let res = ServerDtlsSocket {
             mio_stuff: MioStuff { poll, events },
-            tls_stuff: TlsStuff::new(acc, opts.tls.handle),
+            tls_stuff,
             state: State {
                 connections,
                 listener,

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use enet_dtls::{
     PacketSocket, PacketSocketWrapper, ServerSocketOptions,
     tls::{CookieConfig, ServerTlsOptions, TlsConfig, TlsConfigHandle},
@@ -19,7 +21,7 @@ fn main() {
     p.bind(opts).unwrap();
     let mut buf = vec![0; 1024];
     loop {
-        p.poll().unwrap();
+        p.poll(Some(Duration::from_millis(100))).unwrap();
         match p.receive(&mut buf) {
             Ok(o) => {
                 info!("Received from {} {:?}", o.saddr, &buf[..(o.len as usize)]);

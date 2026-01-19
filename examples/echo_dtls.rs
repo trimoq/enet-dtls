@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use enet_dtls::{
     PacketSocket, PacketSocketWrapper, ServerSocketOptions,
     tls::{CertConfig, CookieConfig, ServerTlsOptions, TlsConfig, TlsConfigHandle},
 };
-use log::{info, warn};
+use log::{info, trace, warn};
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -29,8 +31,10 @@ fn main() {
     };
     p.bind(opts).unwrap();
     let mut buf = vec![0; 1024];
+    let mut i = 0;
     loop {
-        p.poll().unwrap();
+        i+=1;
+        p.poll(Some(Duration::from_millis(100))).unwrap();
         match p.receive(&mut buf) {
             Ok(o) => {
                 info!("Received from {} {:?}", o.saddr, &buf[..(o.len as usize)]);
@@ -42,6 +46,12 @@ fn main() {
                     warn!("e: {e}")
                 }
             },
+        }
+        if i % 10 == 0 {
+            trace!("Updating cookie");
+            let mut cfg = (**cch.load()).clone();
+            cfg.cookies = Some(CookieConfig { secret: i });
+            cch.update(cfg);
         }
     }
 }
